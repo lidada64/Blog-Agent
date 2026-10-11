@@ -4,7 +4,8 @@
 
 - [x] Move Git root from code/ to Agent/, archive legacy Demo, preserve history and a local archive tag, exclude personal/runtime data, and verify all 97 tests from a clean checkout.
 - [x] Rename GitHub repository from Agent-Study to Blog-Agent.
-- [ ] Push reorganized master and archive/agent-study-before-blog-agent. Blocked by existing Keywall pre-push hook: credential vault must be unlocked by the user with kw login.
+- [x] Push reorganized master to Blog-Agent after passing Keywall checks.
+- [ ] Remote archive tag deferred: Keywall detected .env credential records in legacy history. Keep the archive tag and Git bundles local; do not bypass protection. Review legacy credential exposure before publishing additional historical refs.
 
 ## Product roadmap
 

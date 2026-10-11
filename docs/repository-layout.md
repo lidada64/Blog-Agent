@@ -10,4 +10,6 @@ The migration's Git bundle, working diff and source backup are stored locally un
 
 Run python code/evaluate_agent.py --mode offline after install. This includes both test_agent*.py and test_blog*.py, unlike the old evaluator. Verify archive/agent_demo/agent_demo.py --help separately. Actual model calls and benchmarking require explicit credentials and have usage costs; offline checks do not.
 
-Validation: 97/97 offline tests pass in both the working tree and a staged-files-only checkout, without credentials or personal articles. Commit b33a41c contains the reorganization. GitHub rename succeeded; code/tag upload is pending because the existing Keywall pre-push hook reports a locked vault. Unlock with kw login and push normally; do not bypass the hook.
+Validation: all 97 offline tests pass, including a clean-checkout run. The published reorganization commit is 167eb60; GitHub master was updated by a normal fast-forward push after Keywall checks passed. The original remote commit history remains intact. Unpublished intermediate commits were backed up locally and combined before publishing to remove a test credential-assignment false positive.
+
+The archive tag remains local: publishing that historical ref was blocked by Keywall findings for .env credential records in legacy history. No guard was bypassed. Review whether historical credentials need revocation and history cleanup separately; the current published tree excludes local credentials and articles.
