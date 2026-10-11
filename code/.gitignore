@@ -1,0 +1,13 @@
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts
+__pycache__/
+*.pyc
+state.json
+state.json.*.tmp
+agent.log
+progress_checks/
+eval_results/

@@ -19,7 +19,7 @@ from agent_core.metrics import summarize_metrics
 
 def offline():
     # Tests exercise production code with mock models and real local files/MCP.
-    suite = unittest.defaultTestLoader.discover(str(Path(__file__).parent), pattern="test_agent*.py")
+    suite = unittest.defaultTestLoader.discover(str(Path(__file__).parent), pattern="test_*.py")
     stream = io.StringIO()
     started = perf_counter()
     with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):

@@ -1,13 +1,36 @@
-# Local environment variables and secrets
+# Credentials and runtime data
 .env
 .env.*
 !.env.example
-
-# Runtime artifacts
+.blog-agent-data/
+.recall/
+.vscode/
+.workbuddy-ai/
 __pycache__/
-*.pyc
-state.json
-state.json.*.tmp
-agent.log
-progress_checks/
-eval_results/
+*.py[cod]
+*.log
+*.json.md
+/conversation.json
+/state.json
+/skill_library.json
+code/eval_results/
+code/progress_checks/
+archive/agent_demo/progress_checks/
+
+# User articles remain local; clones receive an empty configurable input directory.
+/Blog/*
+!/Blog/.gitkeep
+
+# Personal study/reference material stays on disk, outside the product repository.
+/refer/
+/research/
+/image/
+/mcp_test/
+/1.txt
+/Agent 快速启动.md
+/Agent 最速学习路线.md
+/Agent实习冲刺方向与阶段产出.md
+/*.pdf
+/*.png
+/*.webp
+code/*.txt

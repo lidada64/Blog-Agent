@@ -6,7 +6,6 @@ from time import perf_counter
 
 from .config import DEFAULT_PROMPT, DEFAULT_STATE_PATH, INSTRUCTIONS
 from .local_tools import LOCAL_TOOLS
-from .mcp_tools import execute_tool, function_schema
 from .state import StateStore, now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
 from .metrics import measured_request
@@ -54,6 +53,7 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
                 if not isinstance(paths, list) or not paths or not set(paths).issubset(discovered_paths(state)):
                     raise ValueError("find_text requires paths returned by a completed find_file call")
             if tool_executor is None:
+                from .mcp_tools import execute_tool
                 result = await execute_tool(call["name"], arguments, mcp_client, mcp_tools)
             else:
                 result = await tool_executor(call["name"], arguments)
@@ -88,6 +88,7 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
 async def run_agent(model_client, mcp_client, discovered, prompt, model, max_steps,
                     *, state_path=DEFAULT_STATE_PATH, resume=False, new_task=False, reasoning_effort=None, on_reasoning=None):
     """Resume checkpoints first; max_steps limits new model requests this run."""
+    from .mcp_tools import function_schema
     if max_steps < 1:
         raise ValueError("max_steps must be positive")
     store = StateStore(state_path)

@@ -1,0 +1,4 @@
+# Blog Agent runtime; no MCP server is required.
+openai>=2.29,<3
+python-dotenv>=1.2,<2
+rich>=14.3,<15

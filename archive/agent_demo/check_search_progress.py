@@ -1,7 +1,14 @@
 """Inspect five search checkpoints and verify recovery without a model API or MCP.
 
-Run from the project root: python code/check_search_progress.py --case all
+Run from the project root: python archive/agent_demo/check_search_progress.py --case all
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "code"))
+
+
 
 import argparse
 import asyncio

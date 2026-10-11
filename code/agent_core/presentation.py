@@ -60,7 +60,9 @@ class MarkdownRenderer:
 
 def transcript_markdown(state):
     """Export replies and visible reasoning, excluding tool payloads and ciphertext."""
-    parts = ["# Skill 助手对话", f"状态：{state['status']}；用户轮次：{state['turn_count']}/10"]
+    title = "Blog 助手对话" if state.get("kind") == "blog_conversation" else "Skill 助手对话"
+    max_turns = state.get("max_user_turns", 10)
+    parts = [f"# {title}", f"状态：{state['status']}；用户轮次：{state['turn_count']}/{max_turns}"]
     reasoning_by_turn = {}
     number = 0
     for item in state.get("history", []):

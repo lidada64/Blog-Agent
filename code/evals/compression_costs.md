@@ -12,9 +12,9 @@ standalone 端点不可用，并不影响 local 或 summary。主对话每次请
 完整 history 留在本地，压缩仅替换 context。新记忆是有损的，模型可以通过 read_conversation_history 或重读已收藏文档恢复精确资料。默认阈值 12,000 为序列化 UTF-8 字节，不能当作 token；显式开启 summary 时用 --compact-mode summary。
 
 ```powershell
-python code/agent_demo.py --new --compact-mode none
-python code/agent_demo.py --new --compact-mode local
-python code/agent_demo.py --new --compact-mode summary
+python archive/agent_demo/agent_demo.py --new --compact-mode none
+python archive/agent_demo/agent_demo.py --new --compact-mode local
+python archive/agent_demo/agent_demo.py --new --compact-mode summary
 ```
 
 ## 已拉取的 Flash 价格

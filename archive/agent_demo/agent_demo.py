@@ -1,11 +1,18 @@
 """Interactive Skill library with MCP, conversation checkpoints and compaction.
 
-Run: python code/agent_demo.py
-Resume: python code/agent_demo.py --resume
-Legacy search: python code/agent_demo.py --task "Find 1.txt and search for lidada"
-MCP-only check: python code/agent_demo.py --check-mcp
+Run: python archive/agent_demo/agent_demo.py
+Resume: python archive/agent_demo/agent_demo.py --resume
+Legacy search: python archive/agent_demo/agent_demo.py --task "Find 1.txt and search for lidada"
+MCP-only check: python archive/agent_demo/agent_demo.py --check-mcp
 Dependencies: mcp>=1.30,<3, openai, python-dotenv; Node.js/npx.
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "code"))
+
+
 
 # Keep existing imports compatible; implementation lives in agent_core.
 from agent_core.cli import entrypoint, main

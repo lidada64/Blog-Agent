@@ -9,24 +9,38 @@ from .reasoning import configure_reasoning, validate_reasoning
 
 
 class ConversationStore(StateStore):
-    def __init__(self, path=DEFAULT_CONVERSATION_PATH):
+    def __init__(self, path=DEFAULT_CONVERSATION_PATH, *, kind="skill_conversation",
+                 instructions=SKILL_SYSTEM_PROMPT, max_user_turns=MAX_USER_TURNS,
+                 introduction="请先向用户介绍你的 Skill 检索、下载录入、本地文件与关键词检索能力和退出方法，然后等待用户输入。"):
         super().__init__(path)
+        if type(max_user_turns) is not int or max_user_turns < 1:
+            raise ValueError("max_user_turns must be positive")
+        self.kind, self.instructions = kind, instructions
+        self.max_user_turns, self.introduction = max_user_turns, introduction
 
     def load(self):
         if not self.path.exists():
             return None
         state = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict) or state.get("version") != 2 or state.get("kind") != "skill_conversation":
-            raise ValueError("Not a Skill conversation checkpoint; use --task for old task files")
+        if not isinstance(state, dict) or state.get("version") not in {2, 3} or state.get("kind") != self.kind:
+            raise ValueError(f"Not a {self.kind} checkpoint; use the matching entry point")
+        if state["version"] == 2:
+            if self.kind != "skill_conversation":
+                raise ValueError("Only legacy Skill checkpoints support version 2 migration")
+            state.update(version=3, max_user_turns=MAX_USER_TURNS, introduction=self.introduction)
         required = {
             "conversation_id": str, "model": str, "instructions": str, "status": str,
             "history": list, "context": list, "turns": list, "steps": list,
             "tool_calls": list, "compactions": list, "turn_count": int,
-            "library_file": str, "compact_threshold": int,
+            "compact_threshold": int, "max_user_turns": int, "introduction": str,
         }
         for key, expected in required.items():
             if type(state.get(key)) is not expected:
                 raise ValueError(f"Invalid conversation field: {key}")
+        if self.kind == "skill_conversation" and not isinstance(state.get("library_file"), str):
+            raise ValueError("Invalid Skill library_file")
+        if state["max_user_turns"] < 1:
+            raise ValueError("Invalid maximum user turns")
         # Older checkpoints only supported the standalone endpoint. Migrate to
         # client-owned local memory unless an explicit mode was already saved.
         state.setdefault("compact_mode", "local")
@@ -42,7 +56,7 @@ class ConversationStore(StateStore):
         statuses = {"pending", "running", "waiting_user", "model_error", "compact_error", "max_steps", "interrupted", "closed"}
         if state["status"] not in statuses or state["compact_threshold"] < 1:
             raise ValueError("Invalid conversation status or compaction threshold")
-        if not 0 <= state["turn_count"] <= MAX_USER_TURNS:
+        if not 0 <= state["turn_count"] <= state["max_user_turns"]:
             raise ValueError("Invalid conversation turn count")
         for turn in state["turns"]:
             if not isinstance(turn, dict) or turn.get("kind") not in {"introduction", "user"} or turn.get("status") not in {"running", "completed"} or not isinstance(turn.get("reply"), str):
@@ -81,15 +95,18 @@ class ConversationStore(StateStore):
             self.save(existing)
             return existing
         state = {
-            "version": 2, "kind": "skill_conversation", "conversation_id": str(uuid4()),
-            "model": model, "instructions": SKILL_SYSTEM_PROMPT,
+            "version": 3, "kind": self.kind, "conversation_id": str(uuid4()),
+            "model": model, "instructions": self.instructions,
+            "max_user_turns": self.max_user_turns, "introduction": self.introduction,
             "status": "pending", "phase": "introduction", "created_at": now(),
             "history": [], "context": [], "turns": [], "turn_count": 0,
             "steps": [], "tool_calls": [], "compactions": [], "last_error": None,
-            "library_file": str(library_file), "compact_threshold": compact_threshold,
+            "compact_threshold": compact_threshold,
             "compact_mode": compact_mode or "local",
             "close_reason": None,
         }
+        if self.kind == "skill_conversation":
+            state["library_file"] = str(library_file)
         configure_reasoning(state, reasoning_effort)
         self.save(state)
         return state

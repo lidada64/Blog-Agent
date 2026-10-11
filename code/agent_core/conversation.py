@@ -1,4 +1,4 @@
-"""Interactive Skill conversation, with durable tool recovery and explicit compaction."""
+"""Shared durable conversation loop with an optional compatible Skill adapter."""
 
 import asyncio
 import copy
@@ -7,9 +7,7 @@ import logging
 from .config import MAX_USER_TURNS
 from .context import HISTORY_TOOLS, compact_context, read_history
 from .local_tools import LOCAL_TOOLS
-from .mcp_tools import function_schema
 from .runner import finish_pending, json_item
-from .skill_library import LIBRARY_TOOLS
 from .state import now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
 from .metrics import measured_request
@@ -22,21 +20,24 @@ def is_exit(text):
     return text.strip().casefold().rstrip("。.!！ ") in EXIT_WORDS
 
 
-class SkillConversation:
-    def __init__(self, model_client, mcp_client, discovered, state, store, library, *, max_steps=8, on_reasoning=None):
+class Conversation:
+    """Shared durable loop; the application supplies tools and their executor."""
+    def __init__(self, model_client, state, store, *, tools, tool_executor,
+                 max_steps=8, on_reasoning=None):
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
-        self.model_client, self.mcp_client = model_client, mcp_client
-        self.state, self.store, self.library = state, store, library
+        self.model_client = model_client
+        self.mcp_client, self.mcp_tools = None, {}
+        self.state, self.store = state, store
         self.max_steps = max_steps
         configure_reasoning(state)
         self.on_reasoning = on_reasoning
-        self.mcp_tools = {f"skills_{tool.name}": tool.name for tool in discovered}
-        if "skills_search_skills" not in self.mcp_tools or "skills_get_skill" not in self.mcp_tools:
-            raise ValueError("Skill conversations require MCP search_skills and get_skill")
-        # Local file search is declared first so it stays as prominent as in the
-        # legacy --task loop; both modes share one executor and one ordering rule.
-        self.tools = LOCAL_TOOLS + LIBRARY_TOOLS + HISTORY_TOOLS + [function_schema(tool) for tool in sorted(discovered, key=lambda tool: tool.name)]
+        self.tools = copy.deepcopy(tools)
+        self.tool_executor = tool_executor
+
+    @property
+    def max_user_turns(self):
+        return self.state.get("max_user_turns", MAX_USER_TURNS)
 
     def append_items(self, items):
         self.state["history"].extend(copy.deepcopy(items))
@@ -57,7 +58,7 @@ class SkillConversation:
                 return await self.resume_turn()
             return "ready", ""
         self.state["turns"].append({"number": 0, "kind": "introduction", "status": "running", "reply": ""})
-        self.append_items([{"role": "developer", "content": "请先向用户介绍你的 Skill 检索、下载录入、本地文件与关键词检索能力和退出方法，然后等待用户输入。"}])
+        self.append_items([{"role": "developer", "content": self.state["introduction"]}])
         self.store.save(self.state)
         return await self.resume_turn()
 
@@ -73,9 +74,9 @@ class SkillConversation:
             raise ValueError("Resume the unfinished turn before accepting another user message")
         if not self.state["turns"]:
             raise ValueError("Introduce the assistant before accepting a user message")
-        if self.state["turn_count"] >= MAX_USER_TURNS:
+        if self.state["turn_count"] >= self.max_user_turns:
             self.close("turn_limit")
-            return "closed", "已达到 10 轮，对话结束。"
+            return "closed", f"已达到 {self.max_user_turns} 轮，对话结束。"
         self.state["turn_count"] += 1
         self.state["turns"].append({
             "number": self.state["turn_count"], "kind": "user", "status": "running",
@@ -87,9 +88,7 @@ class SkillConversation:
         return await self.resume_turn()
 
     async def execute_tool(self, name, arguments):
-        if name == "read_conversation_history":
-            return read_history(self.state, arguments["start"], arguments["limit"])
-        return await self.library.execute(name, arguments, self.mcp_client, self.mcp_tools)
+        return await self.tool_executor(name, arguments)
 
     def fail(self, status, error, step=None):
         if step is not None:
@@ -161,7 +160,7 @@ class SkillConversation:
                 if not calls:
                     turn.update(status="completed", reply=response.output_text, completed_at=now())
                     state.update(status="waiting_user", phase="waiting_user")
-                    if state["turn_count"] == MAX_USER_TURNS:
+                    if state["turn_count"] == self.max_user_turns:
                         state.update(status="closed", close_reason="turn_limit", phase="done")
                 self.store.save(state)
                 text = step_reasoning_text(state, step)
@@ -186,6 +185,26 @@ class SkillConversation:
                 state["steps"][-1]["reasoning"]["status"] = "interrupted"
             self.store.save(state)
             raise
+
+
+class SkillConversation(Conversation):
+    """Compatible Skill application over the shared conversation loop."""
+    def __init__(self, model_client, mcp_client, discovered, state, store, library,
+                 *, max_steps=8, on_reasoning=None):
+        from .mcp_tools import function_schema
+        from .skill_library import LIBRARY_TOOLS
+        mcp_tools = {f"skills_{tool.name}": tool.name for tool in discovered}
+        if "skills_search_skills" not in mcp_tools or "skills_get_skill" not in mcp_tools:
+            raise ValueError("Skill conversations require MCP search_skills and get_skill")
+        async def execute(name, arguments):
+            if name == "read_conversation_history":
+                return read_history(state, arguments["start"], arguments["limit"])
+            return await library.execute(name, arguments, mcp_client, mcp_tools)
+        super().__init__(model_client, state, store,
+            tools=LOCAL_TOOLS + LIBRARY_TOOLS + HISTORY_TOOLS + [
+                function_schema(tool) for tool in sorted(discovered, key=lambda tool: tool.name)],
+            tool_executor=execute, max_steps=max_steps, on_reasoning=on_reasoning)
+        self.mcp_client, self.mcp_tools, self.library = mcp_client, mcp_tools, library
 
 
 async def interactive_loop(conversation, first_prompt=None, *, read_input=input, write_output=print, hooks=None):
@@ -213,6 +232,7 @@ async def interactive_loop(conversation, first_prompt=None, *, read_input=input,
 
 async def _interactive_loop(conversation, first_prompt, *, read_input, write_output, show_reply):
     """Count user turns, not the introduction, tools, blank input or exit commands."""
+    max_turns = conversation.state.get("max_user_turns", MAX_USER_TURNS)
     if conversation.state["status"] == "closed":
         write_output("该对话已结束，使用 --new 开始新对话。")
         return 0
@@ -224,7 +244,7 @@ async def _interactive_loop(conversation, first_prompt, *, read_input, write_out
             text, first_prompt = first_prompt, None
         else:
             try:
-                text = read_input(f"你（{conversation.state['turn_count'] + 1}/10）：")
+                text = read_input(f"你（{conversation.state['turn_count'] + 1}/{max_turns}）：")
             except EOFError:
                 conversation.close("eof")
                 write_output("输入已结束，对话已保存。")
@@ -234,7 +254,7 @@ async def _interactive_loop(conversation, first_prompt, *, read_input, write_out
             show_reply(reply)
     if status == "closed":
         if conversation.state["close_reason"] == "turn_limit":
-            write_output("已完成 10 轮用户对话，自动退出。")
+            write_output(f"已完成 {max_turns} 轮用户对话，自动退出。")
         return 0
     error = conversation.state.get("last_error")
     if error:

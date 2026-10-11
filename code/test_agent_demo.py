@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ListToolsResult, Tool
 
-from agent_demo import discover_skill_tools, execute_tool, function_schema, run_agent
+from agent_core.mcp_tools import discover_skill_tools, execute_tool, function_schema
+from agent_core.runner import run_agent
 from agent_core.mcp_connection import connect_mcp
 
 
