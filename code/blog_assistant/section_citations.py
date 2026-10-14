@@ -53,11 +53,12 @@ def audit_sections(answer, calls, posts):
                            version=post["version"], source=post["source"], lines=list(selected),
                            evidence_sha256=hashlib.sha256("\n".join(read[n] for n in selected).encode()).hexdigest())
             key = (post_id, section)
-            if key in sources:
-                return ""
+            # Repeated references still need a readable label at their position.
+            # Only omit the repeated prefix; deleting markers leaves empty lists.
+            prefix = "" if key in sources else source_label
             sources.add(key)
             display_section = section if section != post["title"] else None
-            return (source_label + "*" + escape_label(post["title"]) + "*" +
+            return (prefix + "*" + escape_label(post["title"]) + "*" +
                     (" **" + escape_label(display_section) + "**" if display_section else ""))
         except (OSError, UnicodeError, ValueError, PermissionError) as exc:
             finding["reason"] = str(exc) if isinstance(exc, ValueError) else "source_unavailable"

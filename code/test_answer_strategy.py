@@ -97,6 +97,36 @@ class AnswerStrategyTests(unittest.IsolatedAsyncioTestCase):
         path.write_text("# Design\nChanged.\n", encoding="utf-8")
         self.assertEqual(audit_sections("Old claim [[design]]", calls, posts)["status"], "invalid")
 
+    async def test_repeated_sources_keep_labels_in_body_and_summary(self):
+        from agent_core.presentation import MarkdownRenderer
+        from rich.text import Text
+
+        (self.posts / "design.md").write_text("# Design\n## Boundary\nEvidence.\n", encoding="utf-8")
+        (self.posts / "storage.md").write_text("# Storage\n## Persistence\nEvidence.\n", encoding="utf-8")
+        for separator, label in (("、", "来源："), (", ", "Sources:")):
+            with self.subTest(separator=separator):
+                draft = ("正文 Evidence. [[design|Boundary]] [[storage|Persistence]]\n\n**" + label + "** "
+                         + separator.join(("[[design|Boundary]]", "[[storage|Persistence]]", "[[design|Boundary]]")))
+                state = self.store.start("fixture", new=True, compact_mode="none")
+                client = model(answer("hello"),
+                               response(call("read_post_full", {"post_id": "design"}, "design-read"),
+                                        call("read_post_full", {"post_id": "storage"}, "storage-read")), answer(draft))
+                conversation = create_conversation(client, state, self.store)
+                await conversation.introduce()
+                _, reply = await conversation.submit("Explain design and storage")
+                summary = reply.split("**" + label + "** ")[1]
+                self.assertEqual(summary.count("Design"), 2)
+                self.assertEqual(summary.count("Storage"), 1)
+                self.assertEqual(summary.count("Boundary"), 2)
+                self.assertNotIn("[[", reply)
+                audit = state["turns"][-1]["citation_audit"]
+                self.assertEqual((audit["status"], audit["located"], audit["invalid"]), ("located", 5, 0))
+                self.assertEqual(self.store.load()["turns"][-1]["reply"], reply)
+                for mode in ("plain", "rich"):
+                    output = []
+                    MarkdownRenderer(mode, write_output=output.append).render(reply)
+                    self.assertEqual(Text.from_ansi(output[0]).plain.count("Design"), 3)
+
     async def test_article_help_word_does_not_bypass_evidence_policy(self):
         client = model(answer("hello"), answer("Invented architecture result."))
         conversation = create_conversation(client, self.state, self.store)
