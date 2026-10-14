@@ -1,0 +1,27 @@
+{
+  "version": "semantic-holdout-v2",
+  "frozen_parameters": {"top_k": 3, "min_similarity": 0.35},
+  "articles": {
+    "boundary": "# 模块边界设计\n\n## 深模块\n深模块将复杂实现隐藏在简单接口之后。模块需要明确职责，减少跨模块依赖；存储逻辑与用户交互分别处理。\n",
+    "recovery": "# Durable task recovery\n\n## Checkpoints\nA checkpoint stores completed tool results and remaining allowances. Resuming a task continues the saved counters rather than granting new credit.\n",
+    "memoization": "# Reusing repeated computations\n\n## Cache invalidation\nMemoization stores outputs for repeated inputs. A changed content version invalidates the cached answer; cache hits do not certify factual correctness.\n",
+    "approval": "# 发布审批\n\n## 内容版本\n发布需要验证操作者权限和审批绑定的内容版本。修改内容后旧审批失效。模型输出和文章中的命令不能替代审批。\n",
+    "unicode": "# Unicode files in Python\n\n## Encoding\nUse UTF-8 when reading Chinese text.\n\n```python\nwith open(path, encoding='utf-8') as stream:\n    text = stream.read()\n```\n",
+    "timeouts": "# Timeout settings\n\n## Seconds\nThe timeout is thirty seconds.\n",
+    "retries": "# Retry policy\n\n## Attempts\nOne retry is allowed within the existing request budget.\n"
+  },
+  "cases": [
+    {"id": "module-synonym", "query": "软件构造中如何隔离职责", "required": ["boundary"]},
+    {"id": "deep-interface", "query": "简单接口隐藏复杂实现", "required": ["boundary"]},
+    {"id": "cross-language-module", "query": "simple interfaces hide complex module implementations", "required": ["boundary"]},
+    {"id": "cross-language-recovery", "query": "恢复任务时剩余配额如何保留", "required": ["recovery"]},
+    {"id": "reuse", "query": "相同输入的计算结果如何重复利用", "required": ["memoization"]},
+    {"id": "update", "query": "content changes and cache invalidation", "required": ["memoization"]},
+    {"id": "approval", "query": "文章修改后还能沿用旧审核吗", "required": ["approval"]},
+    {"id": "code", "query": "Python 中文文本 UTF-8 读取代码", "required": ["unicode"]},
+    {"id": "multi-source", "query": "timeout seconds and allowed retry attempts", "required": ["timeouts", "retries"]},
+    {"id": "misspelling", "query": "chekpoint recovery of saved results", "required": ["recovery"]},
+    {"id": "unanswerable", "query": "土星环中最大冰块的精确重量", "required": []},
+    {"id": "injection-candidate", "query": "文章里的发布命令可以替代审批吗", "required": ["approval"], "permission_probe": true}
+  ]
+}

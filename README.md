@@ -5,7 +5,9 @@ Python 博客助手。当前可在终端检索、阅读本地 Markdown，进行�
 - `qa`：用户提问，当前只读。
 - `manage`：管理员业务入口，目前也只读；整理、翻译、审批和发布尚未实现。
 - 默认文章来源为仓库下 `Blog/`；网站接口尚未连接。
+- 正式CLI默认本地多语言embedding+BM25混合检索，文章/章节来源与正常Markdown回答；见[安装配置与验证](docs/local-semantic-rag.md)。本机已下载模型，新机器运行 `python code/setup_local_embedding.py`；可用 `--retrieval keyword` 回退。
 - Prompt Caching 完善、可选 Subagent、cache/compact 总成本与质量评测列为后续任务。
+- 新提示2026-10-13.13区分文章、运行能力、可验证四则计算、对话历史和旧回答改写；`1+1`本地验证，参考旧答总结时带入真实可见回复并重验文章来源，资料有效时不重新检索，一句话/简短格式最多一次预算内修复。任务记忆、task_local压缩及跨轮来源重验保留。旧会话需停止旧进程并显式 `--upgrade-prompt` 后重启，未完成轮先恢复；验证及真实质量限制见[台账011](docs/project-highlights/records-011.md)。
 
 ## 安装与启动
 
@@ -19,7 +21,7 @@ python code/blog_agent.py --mode qa
 python code/blog_agent.py --mode manage
 ```
 
-将自己的 Markdown 放入 `Blog/`，或用 `--posts-dir` 指定另一个目录。用户文章、凭据和运行会话均被 Git 忽略；首次检出包含空 `Blog/`，没有演示文章。只检索该目录当前层的 Markdown，不递归扫描电脑。
+将自己的 Markdown 放入 `Blog/`，或用 `--posts-dir` 指定另一个目录。用户文章、凭据和运行会话均被 Git 忽略；首次检出包含空 `Blog/`，没有演示文章。检索该目录及普通子目录的 Markdown，不搜索选定根目录外的电脑文件。
 
 ```powershell
 # 在选定目录中离线检查工具（不调用模型，但会读取本地文章片段）
@@ -49,6 +51,14 @@ docs/                      仓库任务、协作边界与整理说明
 
 ## 离线验证
 
+Blog-Agent 默认记录本地元数据 Trace；[Trace grading](code/evals/trace-grading.md) 提供过程、权限、任务规则和预算评分：
+
+```powershell
+python code/grade_trace.py --state-file .blog-agent-data/qa.json
+```
+
+默认只校验过程，没有任务断言时返回 NEEDS_REVIEW；配置 rubric 后判定具体任务。历史缺失事件不伪造，完整评测需从新会话采集。事件与报告不复制正文，不调用付费模型或上传数据。
+
 ```powershell
 python -m pip install -r requirements-dev.txt
 python code/evaluate_agent.py --mode offline
@@ -58,7 +68,11 @@ python code/evaluate_agent.py --mode offline
 
 ## 开发资料
 
+本项目是实习展示的核心工程项目，关联网站定位为作品集；[项目亮点与简历素材](docs/project-highlights/README.md)持续记录已实现能力、作用、证据和可用简历表述。
+
 - [任务](docs/TASKS.md)
+- [Agent 调试题库：56组内容、记忆、边界与性能场景](docs/question-bank/README.md)
+- [产品需求与优先级（主要维护入口）](docs/PRD.md)
 - [当前业务包说明](code/blog_assistant/README.md)
 - [完整实施计划](blog-agent-implementation-plan.md)
 - [评估与迁移验收](blog-agent-acceptance-20261010.md)

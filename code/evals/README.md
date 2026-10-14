@@ -1,5 +1,9 @@
 # Agent 评估用法
 
+按真实博客主题设计的[调试题库 v1](../../docs/question-bank/README.md)提供56组单轮、多轮、边界、性能及未来功能验收场景，附固定输入与评分规范。它是手动/未来驱动的设计文档，**不能直接传给本页旧Demo live入口**；真实模型评测尚未运行。
+
+Blog-Agent 的版本化本地事件与分维度评分见 [Trace grading v1](trace-grading.md)。入口 `python code/grade_trace.py --state-file .blog-agent-data/qa.json`；默认规则只测过程，任务目标需单独配置 rubric。原有 evaluate_agent.py 的旧 Demo live/checkpoint 入口继续保留。
+
 压缩/不压缩的实际 token 与费用比较、官方 Flash 价格表、输入用量生成对比图，见 [压缩费用测试](compression_costs.md)。
 
 在项目根目录执行，依赖与主程序相同。评估不会覆盖根目录的 conversation.json、state.json 或 skill_library.json。

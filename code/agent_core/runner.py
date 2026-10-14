@@ -9,6 +9,7 @@ from .local_tools import LOCAL_TOOLS
 from .state import StateStore, now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
 from .metrics import measured_request
+from .tracing import emit, result_hash
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,11 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
         set_tool_status(call, "running")
         state["status"] = "running"
         state["phase"] = "search" if call["name"] == "find_text" else "discover"
+        span = f"tool:{call['call_id']}:{call['attempts']}"
+        turn_number = next((step.get("turn") for step in state["steps"] if step["number"] == call["step"]), state.get("turn_count", 0))
+        emit(state, "tool.start", span_id=span, parent_span_id=f"turn:{turn_number}",
+             turn_id=turn_number, tool_call_id=call["call_id"], tool=call["name"],
+             attempt=call["attempts"], status="running", step=call["step"])
         store.save(state)
         logger.info("Tool started: step=%s tool=%s call_id=%s", call["step"], call["name"], call["call_id"])
         started = perf_counter()
@@ -58,6 +64,12 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
             else:
                 result = await tool_executor(call["name"], arguments)
         except Exception as exc:
+            if isinstance(exc, (ValueError, PermissionError)) and not any(
+                e["event_type"] == "guard.deny" and e["span_id"] == span
+                for e in state.get("trace", {}).get("events", [])
+            ):
+                emit(state, "guard.deny", span_id=span, tool_call_id=call["call_id"],
+                     tool=call["name"], status="denied", error_type=type(exc).__name__, reason="execution_validation")
             logger.exception("Tool error: tool=%s", call["name"])
             result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}
         finally:
@@ -66,6 +78,9 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
             call["elapsed_seconds"] = call.get("elapsed_seconds", 0) + elapsed
         call["result"] = result
         set_tool_status(call, "completed" if result["ok"] else "failed")
+        emit(state, "tool.end", span_id=span, turn_id=turn_number,
+             tool_call_id=call["call_id"], tool=call["name"], status=call["status"],
+             elapsed_seconds=elapsed, error_type=result.get("error", {}).get("type"), result_hash=result_hash(result))
         # Result and function output are committed together.
         output = {
             "type": "function_call_output", "call_id": call["call_id"],

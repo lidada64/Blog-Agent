@@ -5,6 +5,7 @@ import json
 from time import perf_counter
 
 from .state import now
+from .tracing import emit
 
 
 def field(value, name, default=None):
@@ -26,6 +27,7 @@ def usage_metrics(response):
     if input_tokens is not None and cached is not None and cached > input_tokens:
         cached = None  # Invalid provider counters must not produce >100% hit rates.
     return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+            "reasoning_tokens": count(field(field(usage, "output_tokens_details"), "reasoning_tokens")),
             "cached_tokens": cached,
             "cache_hit_ratio": cached / input_tokens if input_tokens and cached is not None else None}
 
@@ -40,13 +42,21 @@ async def measured_request(client, state, *, purpose, operation="create", **kwar
               "input_bytes": len(json.dumps(kwargs.get("input", []), ensure_ascii=False).encode()),
               "compaction_count": len(state.get("compactions", [])),
               "status": "requesting", "input_tokens": None, "output_tokens": None,
-              "cached_tokens": None, "cache_hit_ratio": None}
+              "cached_tokens": None, "cache_hit_ratio": None,
+              "max_output_tokens": count(kwargs.get("max_output_tokens")),
+              "reasoning_effort": field(kwargs.get("reasoning"), "effort"),
+              "incomplete_reason": None, "reasoning_tokens": None}
     state["model_requests"].append(record)
+    span = f"model:{record['number']}"
+    emit(state, "model.start", span_id=span, parent_span_id=f"turn:{state.get('turn_count', 0)}",
+         purpose=purpose, status="requesting")
     started = perf_counter()
     try:
         response = await getattr(client.responses, operation)(**kwargs)
         record.update(usage_metrics(response))
         record.update(status=field(response, "status", "completed"), response_id=field(response, "id"))
+        reason = field(field(response, "incomplete_details"), "reason")
+        record["incomplete_reason"] = reason if isinstance(reason, str) else None
         return response
     except BaseException as exc:
         record.update(status="error" if isinstance(exc, Exception) else "interrupted",
@@ -54,6 +64,10 @@ async def measured_request(client, state, *, purpose, operation="create", **kwar
         raise
     finally:
         record["elapsed_seconds"] = round(perf_counter() - started, 6)
+        emit(state, "model.end", span_id=span, purpose=purpose, status=record["status"],
+             elapsed_seconds=record["elapsed_seconds"], error_type=record.get("error_type"),
+             input_tokens=record["input_tokens"], output_tokens=record["output_tokens"],
+             cached_tokens=record["cached_tokens"], reason=record["incomplete_reason"])
 
 
 def summarize_metrics(state, *, group=True):

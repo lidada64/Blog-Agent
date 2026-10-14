@@ -10,7 +10,8 @@ from .local_tools import LOCAL_TOOLS
 from .runner import finish_pending, json_item
 from .state import now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
-from .metrics import measured_request
+from .metrics import field, measured_request
+from .tracing import emit, interrupt_tools
 
 
 EXIT_WORDS = {"退出", "请退出", "我要退出", "退出吧", "结束", "结束对话", "退出对话", "结束聊天", "停止对话", "再见", "拜拜", "不聊了", "exit", "quit", "bye", "/exit", "/quit", "q"}
@@ -23,7 +24,7 @@ def is_exit(text):
 class Conversation:
     """Shared durable loop; the application supplies tools and their executor."""
     def __init__(self, model_client, state, store, *, tools, tool_executor,
-                 max_steps=8, on_reasoning=None):
+                 max_steps=8, on_reasoning=None, turn_policy=None):
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
         self.model_client = model_client
@@ -34,6 +35,7 @@ class Conversation:
         self.on_reasoning = on_reasoning
         self.tools = copy.deepcopy(tools)
         self.tool_executor = tool_executor
+        self.turn_policy = turn_policy
 
     @property
     def max_user_turns(self):
@@ -45,6 +47,7 @@ class Conversation:
 
     def close(self, reason):
         self.state.update(status="closed", close_reason=reason, phase="done")
+        emit(self.state, "session.stop", status="closed", reason=reason)
         self.store.save(self.state)
 
     @property
@@ -96,6 +99,7 @@ class Conversation:
             step["reasoning"]["status"] = "model_error"
         self.state["status"] = status
         self.state["last_error"] = {"type": type(error).__name__, "message": str(error)}
+        emit(self.state, "run.error", status=status, error_type=type(error).__name__)
         self.store.save(self.state)
         return status, ""
 
@@ -104,21 +108,38 @@ class Conversation:
         if turn is None:
             return self.state["status"], ""
         state = self.state
+        emit(state, "turn.start", span_id=f"turn:{turn['number']}",
+             turn_id=turn["number"], status="running", max_steps=self.max_steps)
         state.update(status="running", last_error=None)
+        policy = self.turn_policy if self.turn_policy is not None and self.turn_policy.active else None
+        if policy is not None:
+            policy.initialize()
+        interrupt_tools(state, "resume_observed_abandoned_attempt")
         for call in state["tool_calls"]:
             if call["running"]:
                 set_tool_status(call, "interrupted")
         self.store.save(state)
         try:
             await finish_pending(state, self.store, self.mcp_client, self.mcp_tools, tool_executor=self.execute_tool)
-            for _ in range(self.max_steps):
-                try:
-                    await compact_context(self.model_client, state, self.store)
-                except Exception as exc:
-                    return self.fail("compact_error", exc)
+            request_limit = policy.initialize()["limits"]["model_requests"] if policy is not None else self.max_steps
+            for _ in range(request_limit):
+                options = {}
+                if policy is not None:
+                    catalog = policy.complete_catalog()
+                    if catalog is not None:
+                        return catalog
+                    options = policy.request_options()
+                    if options is None:
+                        return policy.fallback(policy.initialize()["reason"] or "model_budget")
+                else:
+                    try:
+                        await compact_context(self.model_client, state, self.store)
+                    except Exception as exc:
+                        return self.fail("compact_error", exc)
                 # Compaction swaps the state dictionary contents; obtain live records again.
                 turn = self.unfinished_turn
-                if state["steps"] and state["steps"][-1]["status"] in {"requesting_model", "interrupted", "model_error"}:
+                if (state["steps"] and state["steps"][-1].get("turn") == turn["number"]
+                        and state["steps"][-1]["status"] in {"requesting_model", "interrupted", "model_error"}):
                     step = state["steps"][-1]
                     step["status"] = "requesting_model"
                 else:
@@ -127,21 +148,44 @@ class Conversation:
                 state["phase"] = "introduction" if turn["kind"] == "introduction" else "responding"
                 begin_reasoning(state, step)
                 self.store.save(state)
+                request_task = None
                 try:
-                    response = await measured_request(self.model_client, state, purpose="conversation",
-                        model=state["model"], instructions=state["instructions"],
-                        input=copy.deepcopy(state["context"]),
-                        tools=[] if turn["kind"] == "introduction" else self.tools,
+                    request = measured_request(self.model_client, state, purpose="conversation",
+                        model=state["model"], instructions=options.get("instructions", state["instructions"]),
+                        input=copy.deepcopy(options.get("input", state["context"])),
+                        tools=options.get("tools", [] if turn["kind"] == "introduction" else self.tools),
                         store=False, include=["reasoning.encrypted_content"],
                         reasoning=copy.deepcopy(state["reasoning"]),
+                        **({"max_output_tokens": options["max_output_tokens"]} if "max_output_tokens" in options else {}),
                     )
+                    if policy is not None:
+                        request_task = asyncio.ensure_future(request)
+                        response = await asyncio.wait_for(request_task, timeout=policy.request_timeout())
+                    else:
+                        response = await request
                     if getattr(response, "status", "completed") != "completed":
+                        if policy is not None:
+                            step["status"] = "model_error"
+                            step["reasoning"]["status"] = "model_error"
+                            reason = field(field(response, "incomplete_details"), "reason")
+                            if response.status == "incomplete" and reason == "max_output_tokens":
+                                if policy.retry_truncated():
+                                    continue
+                                return policy.fallback("output_truncated")
+                            return policy.fallback("response_incomplete")
                         raise ValueError(f"Model response is {response.status}; turn remains unfinished")
                     output = [json_item(item) for item in response.output]
                     calls = [item for item in output if item.get("type") == "function_call"]
                     if turn["kind"] == "introduction" and calls:
                         raise ValueError("The introduction must not call tools")
+                    if (policy is not None and
+                            (policy.initialize()["finalizing"] or policy.initialize().get("citation_retries", 0)
+                             or policy.tool_free())
+                            and calls):
+                        raise ValueError("Model called tools during finalization")
                     if not calls and not response.output_text.strip():
+                        if policy is not None and turn["kind"] == "user" and policy.retry_empty(step):
+                            continue
                         raise ValueError("Model returned no answer; turn remains unfinished")
                     seen = {call["call_id"] for call in state["tool_calls"]}
                     for item in calls:
@@ -149,7 +193,25 @@ class Conversation:
                             raise ValueError(f"Duplicate tool call id: {item['call_id']}")
                         seen.add(item["call_id"])
                 except Exception as exc:
+                    if (policy is not None and isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                            and request_task is not None and request_task.cancelled()
+                            and not policy.initialize()["finalizing"]):
+                        step["status"] = "model_error"
+                        step["reasoning"]["status"] = "model_error"
+                        policy.start_finalizing("request_timeout")
+                        continue
+                    if policy is not None and (policy.initialize()["finalizing"] or policy.remaining_seconds() <= 0):
+                        step["status"] = "model_error"
+                        step["reasoning"]["status"] = "model_error"
+                        emit(state, "run.error", status="model_error", error_type=type(exc).__name__)
+                        return policy.fallback("final_generation_failed")
                     return self.fail("model_error", exc, step)
+                if (policy is not None and not calls and turn["kind"] == "user"
+                        and policy.retry_answer_shape(response.output_text, step)):
+                    continue
+                if (policy is not None and not calls and turn["kind"] == "user"
+                        and policy.retry_citations(response.output_text, step)):
+                    continue
                 self.append_items(output)
                 commit_reasoning(state, step, output)
                 for item in calls:
@@ -159,6 +221,10 @@ class Conversation:
                 step["status"] = "tools_pending" if calls else "completed"
                 if not calls:
                     turn.update(status="completed", reply=response.output_text, completed_at=now())
+                    if policy is not None:
+                        policy.record_reply()
+                    emit(state, "turn.end", span_id=f"turn:{turn['number']}",
+                         turn_id=turn["number"], status="completed")
                     state.update(status="waiting_user", phase="waiting_user")
                     if state["turn_count"] == self.max_user_turns:
                         state.update(status="closed", close_reason="turn_limit", phase="done")
@@ -172,11 +238,16 @@ class Conversation:
                 if not calls:
                     return state["status"], turn["reply"]
                 await finish_pending(state, self.store, self.mcp_client, self.mcp_tools, tool_executor=self.execute_tool)
+            if policy is not None:
+                return policy.fallback("model_budget")
             state["status"] = "max_steps"
+            emit(state, "run.error", status="max_steps", reason="step_budget")
             self.store.save(state)
             return "max_steps", ""
         except (asyncio.CancelledError, KeyboardInterrupt):
             state["status"] = "interrupted"
+            emit(state, "run.error", status="interrupted", error_type="Interrupted")
+            interrupt_tools(state, "cancelled")
             for call in state["tool_calls"]:
                 if call["running"]:
                     set_tool_status(call, "interrupted")

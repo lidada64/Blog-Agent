@@ -209,6 +209,10 @@ async def compact_context(model_client, state, store, *, force=False):
         "id": summary_memory["response_id"] if summary_memory else getattr(compacted, "id", None), "mode": mode,
     })
     # A failed save must not discard the still-usable original window in memory.
+    from .tracing import emit
+    emit(candidate, "compact.end", status="completed", mode=mode,
+         before_bytes=before, after_bytes=context_size(output),
+         elapsed_seconds=candidate["compactions"][-1]["elapsed_seconds"])
     store.save(candidate)
     state.clear()
     state.update(candidate)

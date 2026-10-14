@@ -1,0 +1,3 @@
+# Optional CPU runtime, installed in .blog-agent-data/embedding-venv.
+# User authorized a local embedding model on 2026-10-13.
+fastembed==0.9.0

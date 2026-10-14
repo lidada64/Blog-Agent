@@ -58,6 +58,48 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn("**搜索技能**", rendered)
         self.assertNotIn("| --- |", rendered)
 
+    @patch.dict("os.environ", {"TERM": "xterm-256color"}, clear=True)
+    def test_reasoning_markdown_is_gray_including_code_and_table(self):
+        from rich.console import Console
+        from rich.text import Text
+
+        console = Console()
+        output = []
+        hooks = MarkdownHooks("unused.json", mode="rich", write_output=output.append)
+        hooks.on_reasoning(
+            "# 思考\n\n**重点**与[来源](https://example.com)\n\n- 步骤\n\n"
+            "| 项 | 值 |\n| --- | --- |\n| 测试 | 正常 |\n\n```python\nprint('你好')\n```"
+        )
+        for rendered in output:
+            parsed = Text.from_ansi(rendered)
+            for index, character in enumerate(parsed.plain):
+                if not character.isspace():
+                    # Legacy Windows consoles map 256-color gray to bright black.
+                    color = parsed.get_style_at_offset(console, index).color
+                    self.assertIsNotNone(color)
+                    self.assertIn(color.number, (244, 8))
+            self.assertNotIn("**重点**", parsed.plain)
+            self.assertNotIn("```", parsed.plain)
+        hooks.on_reply("正常回答")
+        self.assertNotIn("38;5;244", output[-1])
+        self.assertNotIn("\x1b[90", output[-1])
+
+    def test_plain_reasoning_keeps_original_markdown(self):
+        output = []
+        hooks = MarkdownHooks("unused.json", mode="plain", write_output=output.append)
+        hooks.on_reasoning("**思考**")
+        self.assertEqual(output, ["助手推理：", "**思考**"])
+
+    def test_muted_content_respects_no_color_and_rich_failure(self):
+        output = []
+        with patch.dict("os.environ", {"NO_COLOR": "1"}):
+            MarkdownRenderer("rich", write_output=output.append).render("**思考**", muted=True)
+        self.assertNotIn("\x1b[", output[0])
+        self.assertNotIn("**思考**", output[0])
+        with patch.dict("sys.modules", {"rich.console": None}):
+            MarkdownRenderer("rich", write_output=output.append).render("**思考**", muted=True)
+        self.assertEqual(output[-1], "**思考**")
+
     def test_export_does_not_overwrite_checkpoint_or_include_tool_payloads(self):
         with TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "conversation.md"

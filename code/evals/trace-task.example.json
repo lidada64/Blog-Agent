@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "local-qa-task-example-v1",
+  "expect": {
+    "status": "waiting_user",
+    "turns": [{
+      "number": 1,
+      "tools": ["search_posts", "read_post"],
+      "reply_contains": ["atomic", "sample"],
+      "reply_excludes": ["已发布成功"]
+    }]
+  },
+  "budgets": {
+    "model_requests": 5,
+    "tool_attempts": 3,
+    "steps_per_turn": 4,
+    "elapsed_seconds": 180
+  }
+}

@@ -58,12 +58,12 @@ class BlogAgentTests(unittest.IsolatedAsyncioTestCase):
         client=model(answer('Sample assistant'),
             response(call('search_posts', {'query':'State', 'limit':2}, 'search')),
             response(call('read_post', {'post_id':'agent-state', 'start_line':3, 'limit':3}, 'read')),
-            answer('State persists tool results [agent-state L3-L5].'))
+            answer('- State persists tool results [[agent-state|L3-L5]].'))
         conversation=create_conversation(client,self.state,self.store)
         await conversation.introduce()
         status, reply=await conversation.submit('What does state preserve?')
         self.assertEqual(status,'waiting_user')
-        self.assertIn('agent-state',reply)
+        self.assertIn('Agent state and context',reply)
         result=self.state['tool_calls'][-1]['result']['data']
         self.assertIn('durable tool results',result['text'])
         self.assertEqual(len(result['version']),64)
@@ -71,7 +71,7 @@ class BlogAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load()['turn_count'],1)
         self.assertNotIn('library_file',self.state)
         names={tool['name'] for tool in conversation.tools}
-        self.assertEqual(names,{'search_posts','read_post','find_file','find_text','read_conversation_history'})
+        self.assertEqual(names,{'list_posts','search_posts','read_post','read_post_full','find_file','find_text','read_conversation_history'})
 
     async def test_qa_rejects_write_and_records_failure(self):
         client=model(answer('hello'),response(call('publish_post', {'role':'admin'},'write')),answer('Permission denied'))
@@ -84,11 +84,11 @@ class BlogAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.get('call_id')=='write' and item.get('type')=='function_call_output' for item in saved['history']))
 
     async def test_pending_read_recovers_before_model_request(self):
-        client=model(answer('hello'),response(call('read_post', {'post_id':'agent-state','start_line':3,'limit':3},'read')))
-        conversation=create_conversation(client,self.state,self.store,max_steps=1)
+        client=model(answer('hello'),response(call('read_post', {'post_id':'agent-state','start_line':3,'limit':3},'read')),RuntimeError('interrupted model'))
+        conversation=create_conversation(client,self.state,self.store,max_steps=4)
         await conversation.introduce()
         status,_=await conversation.submit('Read article')
-        self.assertEqual(status,'max_steps')
+        self.assertEqual(status,'model_error')
         # Reproduce persisted-before-execution boundary, without changing the source article.
         state=copy.deepcopy(self.state)
         state['tool_calls'][0]['result']=None

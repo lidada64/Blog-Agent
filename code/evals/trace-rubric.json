@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "blog-process-baseline-v1",
+  "expect": {},
+  "budgets": {
+    "model_requests": 100,
+    "tool_attempts": 100,
+    "steps_per_turn": 8,
+    "elapsed_seconds": 1800
+  }
+}

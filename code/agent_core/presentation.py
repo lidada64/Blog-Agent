@@ -20,7 +20,7 @@ class MarkdownRenderer:
         self.mode, self.write_output = mode, write_output
         self.width = width or shutil.get_terminal_size((88, 24)).columns
 
-    def render(self, text):
+    def render(self, text, *, muted=False):
         if self.mode == "plain":
             self.write_output(text)
             return
@@ -28,7 +28,8 @@ class MarkdownRenderer:
         # if self.mode == "auto" and not sys.stdout.isatty():
         #     self.write_output(text)
         #     return
-        glow = shutil.which("glow") if self.mode in {"auto", "glow"} else None
+        # Muted content uses Rich so Glow's theme cannot override its hierarchy.
+        glow = shutil.which("glow") if not muted and self.mode in {"auto", "glow"} else None
         if glow:
             try:
                 result = subprocess.run(
@@ -42,16 +43,28 @@ class MarkdownRenderer:
                 return
             except (OSError, subprocess.SubprocessError, ValueError):
                 logger.warning("Glow rendering failed; falling back to Rich")
-        elif self.mode == "glow":
+        elif self.mode == "glow" and not muted:
             logger.warning("Glow is not on PATH; falling back to Rich")
         try:
             from rich.console import Console
             from rich.markdown import Markdown
+            from rich.segment import Segment, Segments
+            from rich.style import Style
 
             buffer = io.StringIO()
             # Force terminal colors if the user requested rendering (rich/glow/auto) or if it's a real TTY
             force_tty = True if self.mode in {"rich", "glow", "auto"} else sys.stdout.isatty()
-            Console(file=buffer, width=self.width, force_terminal=force_tty).print(Markdown(text))
+            console = Console(file=buffer, width=self.width, force_terminal=force_tty)
+            markdown = Markdown(text)
+            if muted:
+                # Override after layout/highlighting, including tables and code;
+                # retain bold/italic/link metadata without bright backgrounds.
+                gray = Style(color="grey50", bgcolor="default")
+                segments = [Segment(segment.text, (segment.style or Style()) + gray, segment.control)
+                            for segment in console.render(markdown)]
+                console.print(Segments(segments), end="")
+            else:
+                console.print(markdown)
             self.write_output(buffer.getvalue().rstrip("\n"))
         except Exception as e:
             logger.warning("Markdown rendering failed: %s", e, exc_info=True)
@@ -117,8 +130,8 @@ class MarkdownHooks:
         self.renderer.render(reply)
 
     def on_reasoning(self, text):
-        self.write_output("助手推理：")
-        self.renderer.render(text)
+        self.renderer.render("助手推理：", muted=True)
+        self.renderer.render(text, muted=True)
 
     def on_session_end(self, state):
         text = transcript_markdown(state)

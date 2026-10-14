@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 .blog-agent-data/
+*.trace.json
 .recall/
 .vscode/
 .workbuddy-ai/

@@ -1,0 +1,6 @@
+interface:
+  display_name: "开发难点与简历记录"
+  short_description: "自动分级开发难点，分卷记录尝试过程、方案、验证结果与简历素材"
+  default_prompt: "使用 $challenge-log 核对当前开发问题，按四个维度分级并更新简历素材中的方案与验证结果。"
+policy:
+  allow_implicit_invocation: true
