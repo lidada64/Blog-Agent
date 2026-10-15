@@ -12,6 +12,8 @@ from agent_core.state import now
 from agent_core.tracing import emit
 from .citations import read_lines
 from .sections import join_lines
+from .reference_sections import REFERENCE_VERSION
+from .reference_context import reference_context
 
 MEMORY_VERSION = 1
 TASK_PROMPT_VERSION = "2026-10-13.12"
@@ -23,7 +25,7 @@ NEW_TOPIC = re.compile(r"换个话题|新话题|另一个问题|\b(?:new topic|u
 
 
 def enabled(state):
-    return state.get("prompt", {}).get("version") in {TASK_PROMPT_VERSION, "2026-10-13.13"}
+    return state.get("prompt", {}).get("version") in {TASK_PROMPT_VERSION, "2026-10-13.13", "2026-10-15.14"}
 
 
 def mentions(text, label):
@@ -265,6 +267,17 @@ class TaskContextBuilder:
                               "complete": not missing and not missing_reply and (len(base) > 1 or len(task["turns"]) == 1)}
         # Only the projected read ranges may be used to audit the next answer.
         self.policy.projected_calls = visible
+        if self.state.get('prompt', {}).get('version') == REFERENCE_VERSION and turn.get('citation_repair'):
+            repair = turn.get('citation_repair')
+            if repair and (missing or turn['projection']['missing_constraints']):
+                budget['reason'] = 'citation_repair_source_unavailable'
+                return None
+            reference_item, usable = reference_context(context, visible, self.posts, repair, limit)
+            if not usable:
+                budget['reason'] = 'citation_repair_context_budget'
+                return None
+            if reference_item:
+                context.append(reference_item)
         if missing:
             notice = {"role": "user", "content": "必需资料未完整进入本次输入，不能完成全部结论：" + json.dumps(missing, ensure_ascii=False)}
             if context_size(context + [notice]) <= limit:

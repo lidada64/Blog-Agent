@@ -15,7 +15,8 @@ def join_lines(lines):
     return "\n".join(lines) + ("\n" if lines and lines[-1] == "" else "")
 
 
-def sections(body):
+def headings(body):
+    """Read ATX headings outside fenced code, retaining their hierarchy level."""
     lines = body.splitlines()
     found, fence = [], None
     for number, line in enumerate(lines, 1):
@@ -27,9 +28,16 @@ def sections(body):
             elif char == fence[0] and len(marker[1]) >= fence[1]:
                 fence = None
             continue
-        heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        heading = re.match(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
         if heading and fence is None:
-            found.append({"title": heading[1], "start_line": number})
+            found.append({"title": heading[2], "start_line": number, "level": len(heading[1])})
+    return found
+
+
+def sections(body):
+    """Flat retrieval spans, deliberately independent of citation subtrees."""
+    lines = body.splitlines()
+    found = [{"title": h["title"], "start_line": h["start_line"]} for h in headings(body)]
     for index, item in enumerate(found):
         item["end_line"] = found[index + 1]["start_line"] - 1 if index + 1 < len(found) else len(lines)
     return found

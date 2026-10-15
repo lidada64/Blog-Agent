@@ -40,7 +40,7 @@ class CitationTests(unittest.IsolatedAsyncioTestCase):
                  "result": {"data": self.posts.read("sample", first, limit)}}]
 
     async def test_current_prompt_keeps_factual_boundaries_without_fixed_bullets(self):
-        self.assertEqual(PROMPT_VERSION, "2026-10-13.13")
+        self.assertEqual(PROMPT_VERSION, "2026-10-15.14")
         self.assertIn("不得自创唯一触发条件", INSTRUCTIONS)
         self.assertIn("原文事实与合理推断明确区分", INSTRUCTIONS)
         self.assertIn("不强制逐句引用", INSTRUCTIONS)

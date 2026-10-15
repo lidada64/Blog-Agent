@@ -17,7 +17,7 @@ RUNTIME = re.compile(r"你(?:们)?(?:是|能|可以|会|有|支持).{0,15}(?:谁
 
 
 def enabled(state):
-    return state.get("prompt", {}).get("version") == VERSION
+    return state.get("prompt", {}).get("version") in {VERSION, "2026-10-15.14"}
 
 
 def arithmetic(text):

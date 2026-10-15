@@ -98,3 +98,5 @@ D11/D12架构说明与提交复核续篇见[012](records-012.md)。
 ### 方案与验证
 
 网站实现：src/components/motion/harry-campfire-orbit-renderer.ts、blender/harry-campfire-orbit.py。验收固定构图及绕手部视角、原色/双色播放/暂停、资产上升轨迹、lint/build/类型检查。简历表述待验证，不编造视觉改善比例。
+
+D16 修复与最终验收：[同 ID 续篇](records-012.md#d16--哈利光照手部与火星修复验收续篇)。

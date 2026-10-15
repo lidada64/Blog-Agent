@@ -4,9 +4,10 @@ import re
 
 from .citations import MARKER, audit_answer, read_lines
 from .sections import sections
+from .reference_sections import ReferenceCatalog, REFERENCE_VERSION
 
-PROMPT_VERSION = "2026-10-13.13"
-SECTION_PROMPT_VERSIONS = {"2026-10-13.11", "2026-10-13.12", PROMPT_VERSION}
+PROMPT_VERSION = REFERENCE_VERSION
+SECTION_PROMPT_VERSIONS = {"2026-10-13.11", "2026-10-13.12", "2026-10-13.13", PROMPT_VERSION}
 REFERENCE = re.compile(r"\[\[([^\]|\r\n]+)(?:\|([^\]\r\n]+))?\]\]")
 
 
@@ -14,8 +15,9 @@ def escape_label(text):
     return re.sub(r"([\\`*_{}\[\]<>()!#|])", r"\\\1", text)
 
 
-def audit_sections(answer, calls, posts):
+def audit_sections(answer, calls, posts, *, hierarchical=True):
     indexed = read_lines(calls)
+    catalog = ReferenceCatalog(calls, posts)
     findings, sources = [], set()
     malformed = answer.count("[[") != len(list(REFERENCE.finditer(answer)))
     source_label = "引用自：" if re.search(r"[\u3400-\u9fff]", REFERENCE.sub("", answer)) else "Source: "
@@ -26,7 +28,7 @@ def audit_sections(answer, calls, posts):
         try:
             post = posts.snapshot(post_id)
             read = indexed.get((post_id, post["version"]), {})
-            if not read:
+            if not read and (not hierarchical or MARKER.fullmatch(match[0])):
                 raise ValueError("not_read_or_stale")
             if MARKER.fullmatch(match[0]):
                 legacy = audit_answer(match[0], calls, posts)
@@ -36,6 +38,10 @@ def audit_sections(answer, calls, posts):
                 section = next((s["title"] for s in reversed(sections(post["body"]))
                                 if s["start_line"] <= location["start_line"]), None)
                 selected = range(location["start_line"], location["end_line"] + 1)
+            elif hierarchical:
+                post, read, node, selected, complete = catalog.resolve(post_id, section)
+                section = node['title'] if node else None
+                finding.update(section_id=node['section_id'] if node else None, complete=complete)
             elif section is not None:
                 ranges = [s for s in sections(post["body"]) if s["title"] == section]
                 selected = [n for s in ranges for n in range(s["start_line"], s["end_line"] + 1)
@@ -71,7 +77,8 @@ def audit_sections(answer, calls, posts):
     # Keep formatting intact on success. Invalid source declarations invalidate
     # the draft as a whole; never certify surrounding paragraphs by deleting lines.
     if status != "located":
-        rendered = "本轮回答的文章或章节来源未通过核验，无法提供可靠回答。请明确文章或问题后重试。"
+        rendered = ("本轮回答的来源标注未通过核验，尚未生成可可靠交付的答案。已取得的资料不代表回答已通过核验。"
+                    if hierarchical else "本轮回答的文章或章节来源未通过核验，无法提供可靠回答。请明确文章或问题后重试。")
     return {"status": status, "citations": findings, "rendered": rendered,
             "located": sum(f["status"] == "located" for f in findings),
             "invalid": sum(f["status"] != "located" for f in findings), "semantic_support": None}

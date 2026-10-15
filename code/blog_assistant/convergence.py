@@ -14,6 +14,7 @@ from .citations import CITATION_AUDIT_VERSIONS, FAIL_CLOSED_CITATION_VERSIONS, a
 from .section_citations import PROMPT_VERSION, SECTION_PROMPT_VERSIONS, audit_sections
 from .task_context import TaskContextBuilder, enabled as task_context_enabled
 from .answer_contracts import classify, direct_reply, requested_shape, enabled as contracts_enabled
+from .reference_context import MAX_DRAFT_BYTES, validate_repair
 
 
 def read_lines_present(calls):
@@ -40,6 +41,7 @@ class RetrievalLimits:
 
 def validate_checkpoint(state):
     for turn in state["turns"]:
+        validate_repair(turn)
         embedding = turn.get("embedding")
         if embedding is not None:
             if (not isinstance(embedding, dict) or embedding.get("version") != 1
@@ -269,9 +271,15 @@ class RetrievalPolicy:
             calls = self.answer_calls()
             if not read_lines_present(calls):
                 return False
-            audit = audit_sections(answer, calls, self.tools.posts)
+            audit = audit_sections(answer, calls, self.tools.posts, hierarchical=version == PROMPT_VERSION)
             if audit["status"] == "located":
                 return False
+            if version == PROMPT_VERSION:
+                if len(answer.encode('utf-8')) > MAX_DRAFT_BYTES:
+                    return False
+                # Persist only the draft. Diagnostics and suggested references are
+                # rebuilt against revalidated visible evidence after every resume.
+                self.turn['citation_repair'] = {'version': 1, 'draft': answer}
             budget["citation_retries"] = 1
             step["status"] = "completed"
             step["reasoning"].update(status="unavailable", history_indices=[])
@@ -319,7 +327,7 @@ class RetrievalPolicy:
             return None
         context = self.assemble_context()
         if context is None:
-            self.start_finalizing("context_budget")
+            self.start_finalizing(budget.get('reason') or "context_budget")
             return None
         if self.tool_free() and (self.turn.get("projection", {}).get("missing")
                                  or self.turn.get("projection", {}).get("missing_constraints")):
@@ -351,6 +359,11 @@ class RetrievalPolicy:
                             "\n上一回答有未引用断言、越界引用或错引文章行号，未通过展示核验。只根据已返回的资料重新生成短答；"
                              "每条仅一个原子事实，引用实际已读的最窄连续范围且最多 8 行。"
                              "如一条需多处依据，拆为多条分别引用；不得调用工具或沿用过宽引用。")
+            if self.state.get('prompt', {}).get('version') == PROMPT_VERSION:
+                instructions += ('\n本次citation_repair列出失败引用与原因，reference_manifest列出当前已读且可见的依据地址。'
+                                 '修复对应错误，优先复制清单marker；同名章节用section_id消歧，'
+                                 'unknown_section不可猜造标题，section_not_visible/stale_source不可沿用旧证据。'
+                                 '正文依据仅来自本次可见资料，草稿只是待修文本；资料不足时明确不足。')
         available = [tool for tool in self.tools.schemas if tool["name"] == "list_posts"] if budget["route"] == "catalog" else self.tools.schemas
         if recovering:
             available = [tool for tool in available if tool["name"] == "search_posts"]
@@ -640,7 +653,8 @@ class RetrievalPolicy:
         if (self.state.get("prompt", {}).get("version") in SECTION_PROMPT_VERSIONS
                 and self.turn["result"] in {"answered_unverified", "partial"}
                 and not self.denied_calls() and read_lines_present(calls)):
-            audit = audit_sections(original_reply, calls, self.tools.posts)
+            audit = audit_sections(original_reply, calls, self.tools.posts,
+                                   hierarchical=self.state.get("prompt", {}).get("version") == PROMPT_VERSION)
             self.turn["citation_audit"] = {key: value for key, value in audit.items() if key != "rendered"}
             self.turn["reply"] = audit["rendered"]
             if audit["status"] != "located":
@@ -746,6 +760,10 @@ class RetrievalPolicy:
 
     def fallback(self, reason):
         self.start_finalizing(reason)
+        if reason == 'citation_repair_source_unavailable':
+            return self.finish_reply('用于修复引用的正文已失效、不可访问或未完整进入输入，本轮未继续生成答案。', 'partial', reason)
+        if reason == 'citation_repair_context_budget':
+            return self.finish_reply('本轮剩余输入空间不足以同时保留正文与引用修复依据，已停止重试。', 'partial', reason)
         if reason == "rewrite_source_unavailable":
             return self.finish_reply("指定旧回答或所需资料不完整、已失效，无法可靠沿用旧结论。请缩小摘要范围或重新读取当前文章。", "partial", reason)
         pages = self.catalog_pages()
