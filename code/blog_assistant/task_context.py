@@ -8,6 +8,7 @@ import json
 import re
 
 from agent_core.context import context_size
+from .reading_skill import overhead
 from agent_core.state import now
 from agent_core.tracing import emit
 from .citations import read_lines
@@ -212,7 +213,7 @@ class TaskContextBuilder:
         task = self.sync()
         turn = self.policy.turn
         budget = self.policy.initialize()
-        limit = budget["limits"]["context_bytes"]
+        limit = budget["limits"]["context_bytes"] - overhead(self.policy.state)
         question = {"role": "user", "content": turn["text"]}
         if context_size([question]) > limit:
             turn["projection"] = {"visible": [], "missing": task["required_sources"], "dropped": [], "complete": False}
@@ -299,11 +300,14 @@ class TaskContextBuilder:
             if call["name"] in READS:
                 data = next((c.get("result", {}).get("data", {}) for c in self.policy.current_calls()
                              if c["call_id"] == call["call_id"]), {})
-                projected_output["output"] = json.dumps({"data": {
+                projected_data = {
                     "post_id": data.get("post_id"), "start_line": data.get("start_line"),
                     "end_line": data.get("end_line"), "version": data.get("version"),
                     "body_location": "evidence_memo" if data.get("post_id") in loaded else "not_visible",
-                }}, ensure_ascii=False)
+                }
+                if data.get('navigation'):
+                    projected_data.update(navigation=data['navigation'], next_action='read_post', complete=False)
+                projected_output["output"] = json.dumps({'data': projected_data}, ensure_ascii=False)
             elif call["name"] == "read_conversation_history":
                 result = json.loads(item["output"])
                 if result.get("ok"):
