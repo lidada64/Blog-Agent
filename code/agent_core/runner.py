@@ -1,4 +1,5 @@
 import asyncio
+from .errors import PersistenceError, PolicyDenied, tool_error
 import copy
 import json
 import logging
@@ -63,15 +64,17 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
                 result = await execute_tool(call["name"], arguments, mcp_client, mcp_tools)
             else:
                 result = await tool_executor(call["name"], arguments)
+        except PersistenceError:
+            raise
         except Exception as exc:
-            if isinstance(exc, (ValueError, PermissionError)) and not any(
+            if isinstance(exc, (ValueError, PolicyDenied)) and not any(
                 e["event_type"] == "guard.deny" and e["span_id"] == span
                 for e in state.get("trace", {}).get("events", [])
             ):
                 emit(state, "guard.deny", span_id=span, tool_call_id=call["call_id"],
-                     tool=call["name"], status="denied", error_type=type(exc).__name__, reason="execution_validation")
+                     tool=call["name"], status="denied", error_type=tool_error(exc)['type'], reason="execution_validation")
             logger.exception("Tool error: tool=%s", call["name"])
-            result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}
+            result = {"ok": False, "error": tool_error(exc)}
         finally:
             elapsed = perf_counter() - started
             call.setdefault("attempt_seconds", []).append(elapsed)

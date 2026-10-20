@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from .sections import join_lines
+from .sections import join_lines, headings
+from .navigation import navigation
+from agent_core.errors import PolicyDenied, tool_error
 
 MAX_ARTICLE_BYTES = 128 * 1024
 MAX_ARTICLES = 100
@@ -13,8 +15,9 @@ MAX_DIRECTORIES = 256
 MAX_SCAN_ENTRIES = 4096
 
 class SamplePosts:
-    def __init__(self, directory):
+    def __init__(self, directory, *, max_article_bytes=MAX_ARTICLE_BYTES):
         self.directory = Path(directory).resolve(strict=True)
+        self.max_article_bytes = max_article_bytes
         if not self.directory.is_dir():
             raise ValueError("posts directory must be a directory")
 
@@ -25,7 +28,7 @@ class SamplePosts:
             raise ValueError("post_id must be a relative article path without .md or traversal segments")
         path = (self.directory / f"{identifier}.md").resolve(strict=True)
         if not path.is_relative_to(self.directory):
-            raise PermissionError("Article resolves outside the selected directory")
+            raise PolicyDenied("Article resolves outside the selected directory")
         if not path.is_file():
             raise ValueError("Article is not a file")
         return path
@@ -33,11 +36,12 @@ class SamplePosts:
     def snapshot(self, identifier):
         path = self._path(identifier)
         with path.open("rb") as stream:
-            raw = stream.read(MAX_ARTICLE_BYTES + 1)
-        if len(raw) > MAX_ARTICLE_BYTES:
-            raise ValueError("Sample article exceeds 128 KiB")
+            raw = stream.read(self.max_article_bytes + 1)
+        if len(raw) > self.max_article_bytes:
+            raise ValueError("Sample article exceeds configured byte limit")
         text = raw.decode("utf-8")
-        title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), identifier)
+        titles = headings(text)
+        title = titles[0]["title"] if titles else identifier
         return {"post_id": identifier, "title": title[:200], "version": hashlib.sha256(raw).hexdigest(),
                 "source": path.as_uri(), "visibility": "local_article", "body": text}
 
@@ -66,6 +70,7 @@ class SamplePosts:
         if len(body) > MAX_OUTPUT_CHARS:
             return {**post, "start_line": 1, "end_line": 0, "total_lines": len(lines),
                     "text": "", "complete": False, "next_line": 1,
+                    "next_action": "read_post", "navigation": navigation({**post, 'body': body}),
                     "incomplete_reason": "full_text_exceeds_output_budget; use read_post"}
         return {**post, "start_line": 1, "end_line": len(lines), "total_lines": len(lines),
                 "text": body, "complete": True, "next_line": None}
@@ -107,13 +112,13 @@ class SamplePosts:
                 items.append(post)
                 versions.append([path.relative_to(self.directory).as_posix(), post["version"]])
             except (OSError, UnicodeError, ValueError, PermissionError) as exc:
-                issues.append({"filename": path.relative_to(self.directory).as_posix()[:200], "error_type": type(exc).__name__})
+                issues.append({"filename": path.relative_to(self.directory).as_posix()[:200], "error_type": tool_error(exc)['type']})
                 try:
                     stat = path.stat()
                     marker = [stat.st_size, stat.st_mtime_ns]
                 except OSError:
                     marker = None
-                versions.append([path.relative_to(self.directory).as_posix(), type(exc).__name__, marker])
+                versions.append([path.relative_to(self.directory).as_posix(), tool_error(exc)['type'], marker])
         version = hashlib.sha256(json.dumps(
             [str(self.directory), versions], ensure_ascii=False).encode()).hexdigest()
         return items, issues, version
@@ -157,7 +162,7 @@ class SamplePosts:
                 # Return listed path so aliases can be resolved and checked again on read.
                 matches.append(str(path.absolute()))
             except (OSError, ValueError, PermissionError) as exc:
-                issues.append({"filename": path.name[:200], "error_type": type(exc).__name__})
+                issues.append({"filename": path.name[:200], "error_type": tool_error(exc)['type']})
         return {"ok": True, "data": matches[:5], "truncated": len(matches) > 5,
                 "issues": issues[:5], "issues_count": len(issues)}
 
@@ -169,14 +174,14 @@ class SamplePosts:
                 path = Path(value)
                 if (not path.is_absolute() or not path.is_relative_to(self.directory)
                         or path.suffix.casefold() != ".md"):
-                    raise PermissionError("Only discovered files in the selected directory are readable")
+                    raise PolicyDenied("Only discovered files in the selected directory are readable")
                 post = self.snapshot(self.identifier(path))
                 for line_number, line in enumerate(post.pop("body").splitlines(), 1):
                     if text.casefold() in line.casefold():
                         matches.append({**post, "path": str(path), "line": line_number,
                                         "snippet": line[:500], "snippet_truncated": len(line) > 500})
             except (OSError, UnicodeError, ValueError, PermissionError) as exc:
-                issues.append({"filename": Path(value).name[:200], "error_type": type(exc).__name__})
+                issues.append({"filename": Path(value).name[:200], "error_type": tool_error(exc)['type']})
         return {"ok": True, "data": matches[:5], "truncated": len(matches) > 5,
                 "issues": issues[:5], "issues_count": len(issues)}
 
@@ -196,7 +201,7 @@ class SamplePosts:
                                     "snippet": snippet[:500], "score": len(matches),
                                     "snippet_truncated": len(snippet) > 500})
             except (OSError, UnicodeError, ValueError, PermissionError) as exc:
-                issues.append({"post_id": self.identifier(path)[:200], "error_type": type(exc).__name__})
+                issues.append({"post_id": self.identifier(path)[:200], "error_type": tool_error(exc)['type']})
         results.sort(key=lambda post: (-post["score"], post["post_id"]))
         # Total tool output stays bounded: up to five 500-char snippets plus metadata.
         return {"matches": results[:limit], "issues": issues[:5], "issues_count": len(issues)}

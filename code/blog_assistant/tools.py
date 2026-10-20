@@ -2,8 +2,14 @@
 from agent_core.context import HISTORY_TOOLS, read_history
 from .permissions import Permissions
 from agent_core.tracing import emit
+from agent_core.errors import PolicyDenied, tool_error
+from .article_memory_read import MEMORY_TOOLS
 
 BLOG_TOOLS = [
+    {"type": "function", "name": "get_article_overview", "description": "Show a persisted whole-article overview plus paged real chapter directory, then finish this overview turn. Use for article summary requests, not detailed factual questions. If unavailable shows truthful cold state; never generates summaries on demand. offset starts at 0.",
+     "parameters": {"type": "object", "properties": {"post_id": {"type":"string","maxLength":200}, "offset":{"type":"integer","minimum":0,"maximum":100000}}, "required":["post_id","offset"], "additionalProperties":False}},
+    {"type": "function", "name": "read_article_section", "description": "Show the stored summary of a chapter and finish this summary turn. selector is its exact title/ID or a previously displayed number bound to post_id/version. For detailed questions, code, numbers or quotations use original read_post instead. Never changes articles or consumes background model budget.",
+     "parameters": {"type":"object", "properties":{"post_id":{"type":"string","maxLength":200},"selector":{"type":"string","maxLength":300}}, "required":["post_id","selector"], "additionalProperties":False}},
     {"type": "function", "name": "list_posts", "description": "List Markdown article metadata recursively within the selected knowledge root using stable pagination. post_id is a relative path without .md, including folders. Use for catalog questions; follow next_cursor until null and report partial pages/issues. Does not grant find_text discovery permission.",
      "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}, "cursor": {"type": "string", "minLength": 0, "maxLength": 1000}}, "required": ["limit", "cursor"], "additionalProperties": False}},
     {"type": "function", "name": "find_file", "description": "Find Markdown files recursively inside the selected knowledge root by a literal case-insensitive relative-path substring. A folder name such as 底层技能 finds articles beneath that folder. Returns absolute paths, at most five; truncated means more exist. Does not search the whole computer.",
@@ -14,7 +20,7 @@ BLOG_TOOLS = [
      "parameters": {"type": "object", "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 200}, "limit": {"type": "integer", "minimum": 1, "maximum": 5}}, "required": ["query", "limit"], "additionalProperties": False}},
     {"type": "function", "name": "read_post", "description": "Read up to 80 lines / 6000 characters from a local article. post_id is a relative path without .md, e.g. 底层技能/系统架构设计. Use the search candidate start_line for long articles. Preserve internal source/version/lines, display article/section references per prompt. Never use absolute paths or parent traversal.",
      "parameters": {"type": "object", "properties": {"post_id": {"type": "string", "maxLength": 200}, "start_line": {"type": "integer", "minimum": 1}, "limit": {"type": "integer", "minimum": 1, "maximum": 80}}, "required": ["post_id", "start_line", "limit"], "additionalProperties": False}},
-    {"type": "function", "name": "read_post_full", "description": "Read one complete local article only when its full text fits 6000 characters. Returns complete=false and no text when over budget; then use read_post in segments. Internal metadata preserves source/version/lines; display article/section references per prompt.",
+    {"type": "function", "name": "read_post_full", "description": "Read one complete local article only when its full text fits 6000 characters. Otherwise returns complete=false, no body text and bounded navigation_only headings/ranges. Choose a relevant start_line and call read_post (up to 80 lines); navigation is not answer evidence. If truncated, next_start_line locates the remaining area. Internal metadata preserves source/version/lines; display article/section references per prompt.",
      "parameters": {"type": "object", "properties": {"post_id": {"type": "string", "maxLength": 200}}, "required": ["post_id"], "additionalProperties": False}},
 ] + HISTORY_TOOLS
 
@@ -37,28 +43,32 @@ def validate_arguments(schema, arguments):
 
 
 class BlogTools:
-    def __init__(self, posts, mode, state, *, enable_full=False, retriever=None):
+    def __init__(self, posts, mode, state, *, enable_full=False, retriever=None, memory=None):
         self.posts, self.permissions, self.state = posts, Permissions(mode), state
         self.enable_full = enable_full
         self.retriever = retriever
+        self.memory = memory
+        if memory is not None and (memory.root != str(posts.directory) or memory.scope != f'{mode}:local-v1'):
+            raise PolicyDenied('Article memory root/mode scope differs from conversation')
         self.schemas = [tool for tool in BLOG_TOOLS if tool["name"] in self.allowed]
 
     @property
     def allowed(self):
         from .permissions import MODE_TOOLS
         allowed = MODE_TOOLS[self.permissions.mode]
+        allowed = allowed if self.memory is not None else allowed - MEMORY_TOOLS
         return allowed if self.enable_full else allowed - {"read_post_full"}
 
     def require(self, name):
         self.permissions.require(name)
         if name not in self.allowed:
-            raise PermissionError(f"Tool {name} is unavailable to this prompt version")
+            raise PolicyDenied(f"Tool {name} is unavailable to this prompt version")
 
     async def execute(self, name, arguments):
         try:
             return await self._execute(name, arguments)
-        except (ValueError, PermissionError) as exc:
-            self.guard("guard.deny", name, "denied", type(exc).__name__)
+        except (ValueError, PolicyDenied) as exc:
+            self.guard("guard.deny", name, "denied", tool_error(exc)['type'])
             raise
 
     def guard(self, event_type, name, status, error_type=None):
@@ -72,6 +82,12 @@ class BlogTools:
         tool = next(tool for tool in self.schemas if tool["name"] == name)
         schema = tool["parameters"]
         validate_arguments(schema, arguments)
+        if name in MEMORY_TOOLS:
+            self.guard("guard.allow", name, "allowed")
+            data = self.memory.read(arguments['post_id'],
+                                    selector=arguments.get('selector'), offset=arguments.get('offset',0),
+                                    selection=self.state.get('article_memory_selection'))
+            return {'ok': True, 'data': data}
         if name == "read_conversation_history":
             self.guard("guard.allow", name, "allowed")
             return read_history(self.state, arguments["start"], arguments["limit"])
@@ -84,7 +100,7 @@ class BlogTools:
         if name == "find_text":
             from agent_core.runner import discovered_paths
             if not set(arguments["paths"]).issubset(discovered_paths(self.state)):
-                raise PermissionError("find_text requires paths returned by a completed find_file call")
+                raise PolicyDenied("find_text requires paths returned by a completed find_file call")
             self.guard("guard.allow", name, "allowed")
             return self.posts.find_text(arguments["paths"], arguments["text"])
         self.guard("guard.allow", name, "allowed")

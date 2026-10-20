@@ -1,0 +1,15 @@
+{
+  "model": "",
+  "base_url": "",
+  "prompt_version": "article-summary-v1",
+  "currency": "",
+  "max_requests": 0,
+  "max_input_tokens": 0,
+  "max_output_tokens": 0,
+  "max_cost_microunits": 0,
+  "input_price_per_million": 0,
+  "output_price_per_million": 0,
+  "chunk_chars": 6000,
+  "summary_chars": 1200,
+  "request_output_tokens": 2048
+}
