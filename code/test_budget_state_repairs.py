@@ -128,7 +128,7 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["incomplete_reason"], "max_output_tokens")
         self.assertEqual(record["output_tokens"], 2048)
         self.assertEqual(record["reasoning_tokens"], 1000)
-        self.assertEqual(record["max_output_tokens"], 8192)
+        self.assertEqual(record["max_output_tokens"], 2048)
 
     async def test_full_read_truncation_retries_with_evidence_under_saved_budget(self):
         client = model(answer("hello"),

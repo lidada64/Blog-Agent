@@ -8,7 +8,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from .config import DEFAULT_STATE_PATH
-from .errors import PersistenceError
 
 
 def now():
@@ -28,24 +27,18 @@ def set_tool_status(call, status):
 def atomic_write_json(path, data):
     """Replace one JSON file only after its complete contents reach disk."""
     path = Path(path)
-    temporary = None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
             file.write("\n")
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)
-    except OSError as exc:
-        raise PersistenceError(f"Checkpoint write failed: {path.name} ({type(exc).__name__})") from exc
     finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass  # Cleanup must not mask the original failure or a successful replace.
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 class StateStore:

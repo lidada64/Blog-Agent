@@ -10,13 +10,11 @@ from dataclasses import asdict, dataclass
 from agent_core.context import context_size
 from agent_core.state import now
 from agent_core.tracing import emit
-from agent_core.errors import PolicyDenied
 from .citations import CITATION_AUDIT_VERSIONS, FAIL_CLOSED_CITATION_VERSIONS, audit_answer
 from .section_citations import PROMPT_VERSION, SECTION_PROMPT_VERSIONS, audit_sections
 from .task_context import TaskContextBuilder, enabled as task_context_enabled
 from .answer_contracts import classify, direct_reply, requested_shape, enabled as contracts_enabled
 from .reference_context import MAX_DRAFT_BYTES, validate_repair
-from .reading_skill import guidance, overhead
 
 
 def read_lines_present(calls):
@@ -33,7 +31,7 @@ class RetrievalLimits:
     no_progress: int = 2
     elapsed_seconds: int = 120
     context_bytes: int = 32000
-    output_tokens: int = 8192
+    output_tokens: int = 2048
 
     def __post_init__(self):
         for key, value in asdict(self).items():
@@ -57,8 +55,6 @@ def validate_checkpoint(state):
         budget = turn.get("retrieval")
         if budget is None:
             continue
-        if budget.get('phase', 'discovery') not in {'discovery', 'locating', 'reading', 'answering'}:
-            raise ValueError('Invalid retrieval phase')
         if not isinstance(budget, dict) or type(budget.get("version")) is not int or budget.get("version") not in {1, 2}:
             raise ValueError("Unsupported retrieval checkpoint")
         try:
@@ -112,10 +108,6 @@ class RetrievalPolicy:
     def initialize(self):
         turn = self.turn
         if "retrieval" not in turn:
-            if self.tools.memory is not None:
-                from .task_context import NEW_TOPIC
-                if NEW_TOPIC.search(turn.get('text','')):
-                    self.state.pop('article_memory_selection',None)
             steps = {s["number"] for s in self.state["steps"] if s.get("turn") == turn["number"]}
             calls = [c for c in self.state["tool_calls"] if c["step"] in steps]
             # Legacy unfinished checkpoints inherit their recorded consumption.
@@ -141,7 +133,7 @@ class RetrievalPolicy:
                 "finalization_reserve": 2 if limits["model_requests"] >= 3 else 1,
                 "deadline": time.time() + max(0, self.limits.elapsed_seconds - spent),
                 "no_progress": 0, "seen": [], "cache": {}, "reason": "legacy_budget_consumed" if exhausted else None,
-                "finalizing": exhausted, "context_peak_bytes": 0, "phase": "discovery",
+                "finalizing": exhausted, "context_peak_bytes": 0,
                 "route": ("help" if self.state.get("prompt", {}).get("version") in SECTION_PROMPT_VERSIONS and self.help_question(turn.get("text", "")) else
                           "catalog" if self.catalog_question(turn.get("text", "")) else "qa"),
             }
@@ -233,7 +225,6 @@ class RetrievalPolicy:
         budget = self.initialize()
         if not budget["finalizing"]:
             budget.update(finalizing=True, reason=reason)
-            budget['phase'] = 'answering'
             emit(self.state, "budget", status="stopping_exploration", reason=reason)
             self.store.save(self.state)
 
@@ -270,8 +261,6 @@ class RetrievalPolicy:
         budget = self.initialize()
         version = self.state.get("prompt", {}).get("version")
         if version in SECTION_PROMPT_VERSIONS:
-            if budget['finalizing'] and budget.get('reason') in {'no_progress', 'model_budget', 'tool_budget', 'elapsed_budget'}:
-                return False
             if task_context_enabled(self.state) and (self.turn.get("projection", {}).get("missing")
                                                      or self.turn.get("projection", {}).get("missing_constraints")):
                 return False
@@ -340,14 +329,6 @@ class RetrievalPolicy:
         if context is None:
             self.start_finalizing(budget.get('reason') or "context_budget")
             return None
-        if self.tools.memory is not None:
-            from .article_memory_read import selection_context
-            selection = selection_context(self.state)
-            if selection:
-                item = {'role':'user', 'content':selection}
-                from agent_core.context import context_size
-                if context_size(context + [item]) <= budget['limits']['context_bytes'] - overhead(self.state):
-                    context.append(item)
         if self.tool_free() and (self.turn.get("projection", {}).get("missing")
                                  or self.turn.get("projection", {}).get("missing_constraints")):
             self.start_finalizing("rewrite_source_unavailable")
@@ -355,7 +336,7 @@ class RetrievalPolicy:
         budget["model_requests"] += 1
         self.state["context"] = copy.deepcopy(context)
         self.store.save(self.state)  # Reserve before network I/O, including failed attempts.
-        instructions = guidance(self.state) + self.state["instructions"]
+        instructions = self.state["instructions"]
         if self.tool_free():
             instructions += "\n本轮只改写已提供的指定旧回答，不检索、不读文件、不新增事实。用户要求一句话时正文只输出一个句子，引用标记另起一行。"
             if self.turn["answer_contract"]["brief"]:
@@ -418,7 +399,7 @@ class RetrievalPolicy:
         start = next((i for i in range(len(history) - 1, -1, -1)
                       if history[i].get("role") == "user"), 0)
         question = copy.deepcopy(history[start:start + 1])
-        limit = self.initialize()["limits"]["context_bytes"] - overhead(self.state)
+        limit = self.initialize()["limits"]["context_bytes"]
         if context_size(question) > limit:
             return None
         # Preserve recent prior dialogue for follow-ups; tools can read older history.
@@ -499,7 +480,7 @@ class RetrievalPolicy:
         if not self.active:
             return await self.tools.execute(name, arguments)
         if self.tool_free():
-            raise PolicyDenied("This rewrite turn cannot execute tools; use the supplied verified answer")
+            raise PermissionError("This rewrite turn cannot execute tools; use the supplied verified answer")
         budget = self.initialize()
         limits = budget["limits"]
         if (budget["finalizing"] or budget["tool_attempts"] >= limits["tool_attempts"]
@@ -530,15 +511,8 @@ class RetrievalPolicy:
             if name == "find_text":
                 from agent_core.runner import discovered_paths
                 if not set(arguments["paths"]).issubset(discovered_paths(self.state)):
-                    raise PolicyDenied("find_text requires paths returned by a completed find_file call")
-            from .article_memory_read import MEMORY_TOOLS
-            if name in MEMORY_TOOLS:
-                # Summary reads revalidate directly; do not run the bounded foreground catalog.
-                version = str(time.time_ns())
-            elif name in {'read_post','read_post_full'} and self.tools.memory is not None:
-                version = self.tools.posts.snapshot(arguments['post_id'])['version']
-            else:
-                version = self.tools.posts.catalog()[2] if name != "read_conversation_history" else str(len(self.state["history"]))
+                    raise PermissionError("find_text requires paths returned by a completed find_file call")
+            version = self.tools.posts.catalog()[2] if name != "read_conversation_history" else str(len(self.state["history"]))
         except Exception:
             budget["no_progress"] += 1
             emit(self.state, "retrieval.progress", tool=name, status="no_progress", reason="validation_or_scope_failure")
@@ -571,10 +545,6 @@ class RetrievalPolicy:
             new = identities - set(budget["seen"])
             budget["seen"] = sorted(set(budget["seen"]) | identities)
             budget["no_progress"] = 0 if new else budget["no_progress"] + 1
-            if name in {'read_post', 'read_post_full'}:
-                budget['phase'] = 'reading'
-                if name == 'read_post_full' and not result['data']['complete']:
-                    budget['phase'] = 'locating'
             emit(self.state, "retrieval.progress", tool=name, status="new_evidence" if new else "no_progress",
                  reason="cache_reuse" if cache_hit else "executed")
             if name == "list_posts":
@@ -589,9 +559,6 @@ class RetrievalPolicy:
     @staticmethod
     def identities(name, result):
         data = result["data"]
-        from .article_memory_read import MEMORY_TOOLS
-        if name in MEMORY_TOOLS:
-            return {hashlib.sha256(json.dumps([name,data],sort_keys=True,ensure_ascii=False).encode()).hexdigest()}
         if name in {"read_post", "read_post_full"}:
             records = [data]
         elif name == "list_posts":
@@ -604,9 +571,6 @@ class RetrievalPolicy:
         for record in records:
             if isinstance(record, dict) and "post_id" in record:
                 if name in {"read_post", "read_post_full"}:
-                    if name == 'read_post_full' and not record.get('complete') and record.get('next_line'):
-                        identities.append(hashlib.sha256(json.dumps(
-                            ['read_fallback', record['post_id'], record['version']]).encode()).hexdigest())
                     for line in range(record["start_line"], record["end_line"] + 1):
                         identities.append(hashlib.sha256(json.dumps(
                             ["read", record["post_id"], record["version"], line], ensure_ascii=False).encode()).hexdigest())
@@ -657,31 +621,7 @@ class RetrievalPolicy:
 
     def denied_calls(self):
         return [c for c in self.current_calls() if c["status"] == "failed"
-                and c.get("result", {}).get("error", {}).get("category") == "policy_denied"]
-
-    def operational_failures(self):
-        calls = self.current_calls()
-        return [call for index, call in enumerate(calls)
-                if call['status'] == 'failed'
-                and call.get('result', {}).get('error', {}).get('category') in {'io', 'execution'}
-                and not any(later['status'] == 'completed' and later['name'] == call['name']
-                            and json.loads(later['arguments']) == json.loads(call['arguments'])
-                            for later in calls[index + 1:])]
-
-    @staticmethod
-    def protocol_text(text):
-        # Only an attempted protocol response, not a mention in ordinary prose.
-        return bool(re.match(r'^\s*(?:```[^\n]*\n\s*)?(?:<[|｜]{1,2}DSML[|｜]{1,2}\s*(?:calls|invoke)|<tool_call>)', text, re.I))
-
-    def protocol_failure(self):
-        budget = self.initialize()
-        self.turn['failure'] = {'category': 'protocol', 'stage': 'answering',
-                                'cause': budget.get('reason') or 'invalid_model_protocol'}
-        reason = budget.get('reason')
-        reply = '模型返回了无效的工具协议文本，本轮未形成可交付答案；该文本没有作为工具执行。'
-        if reason:
-            reply = '本轮探索已提前停止（' + reason + '）。' + reply
-        return self.finish_reply(reply, 'protocol_error', reason or 'invalid_model_protocol')
+                and c.get("result", {}).get("error", {}).get("type") == "PermissionError"]
 
     def replace_final_message(self, reply):
         """Keep the durable dialogue aligned with the guarded user-visible reply."""
@@ -694,18 +634,6 @@ class RetrievalPolicy:
     def record_reply(self):
         self.turn["result"] = self.outcome()
         original_reply = self.turn["reply"]
-        failed = self.operational_failures()
-        if failed:
-            error = failed[0]['result']['error']
-            self.turn['failure'] = {'category': error['category'], 'stage': 'tool_execution',
-                                    'cause': error['type'], 'tool': failed[0]['name']}
-            self.turn['result'] = 'tool_error'
-            self.turn['reply'] = ('读取资料时发生文件访问错误，请检查文章来源是否仍可访问。'
-                                  if error['category'] == 'io' else '执行工具时发生程序错误。') + '本轮尚未完成；已取得的资料不代表答案已经核验。'
-            self.replace_final_message(self.turn['reply'])
-            if self.uses_task_memory():
-                TaskContextBuilder(self).finish()
-            return
         if not requested_shape(original_reply, self.turn.get("answer_contract", {})):
             self.turn["result"] = "format_unverified"
             self.turn["reply"] = "尚未生成符合所要求简洁格式的摘要，请明确要保留的重点。"
@@ -730,12 +658,7 @@ class RetrievalPolicy:
             self.turn["citation_audit"] = {key: value for key, value in audit.items() if key != "rendered"}
             self.turn["reply"] = audit["rendered"]
             if audit["status"] != "located":
-                if self.turn['result'] == 'partial' and self.initialize().get('reason'):
-                    self.turn['failure'] = {'category': 'retrieval_stopped', 'stage': 'reading',
-                                            'cause': self.initialize()['reason'], 'symptom': audit['status']}
-                    self.turn['reply'] = '本轮资料探索已停止（' + self.initialize()['reason'] + '），回答未完成。' + self.turn['reply']
-                else:
-                    self.turn["result"] = "citation_unverified"
+                self.turn["result"] = "citation_unverified"
             elif self.turn["result"] == "partial":
                 self.turn["reply"] = "本轮只取得部分资料，以下内容不代表已完成全部检索。\n" + self.turn["reply"]
             self.replace_final_message(self.turn["reply"])
@@ -795,22 +718,6 @@ class RetrievalPolicy:
             TaskContextBuilder(self).finish()
 
     def complete_catalog(self):
-        from .article_memory_read import MEMORY_TOOLS, render_memory
-        memory_calls = [c for c in self.current_calls() if c['status']=='completed' and c['name'] in MEMORY_TOOLS]
-        if self.tools.memory is not None and memory_calls:
-            if self.denied_calls() or self.operational_failures():
-                return None
-            try:
-                results = [self.tools.memory.refresh(call['result']['data'], self.state.get('article_memory_selection')) for call in memory_calls]
-            except (OSError, ValueError):
-                return self.finish_reply('文章或摘要版本已变化，请重新读取当前目录。', 'partial', 'memory_stale')
-            for data in results:
-                self.tools.memory.bind(data, self.state)
-            evidence = [{k:data[k] for k in ('post_id','version','generation_version','node_id','evidence_type','source_range')} for data in results]
-            self.turn['derived_evidence'] = evidence[0] if len(evidence)==1 else evidence
-            english = not bool(re.search(r'[\u3400-\u9fff]',self.turn.get('text','')))
-            return self.finish_reply('\n\n---\n\n'.join(render_memory(data,english) for data in results),
-                                     'completed' if all(data['summary'] for data in results) else 'partial', 'article_memory')
         if contracts_enabled(self.state):
             reply = direct_reply(self.state, self.turn)
             if reply is not None:

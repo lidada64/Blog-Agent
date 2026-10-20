@@ -36,16 +36,6 @@ python code/blog_agent.py --mode qa --state-file .blog-agent-data/another-qa.jso
 
 每种模式默认独立保存会话；旧会话不允许静默切换目录或模式。`--new` 会替换指定会话。模式名称不等于登录认证；模型说自己是管理员不能改变执行层权限。正常问答会把检索到的片段发送至配置的模型服务。
 
-## 阅读 Skill 试用
-
-```powershell
-python code/blog_agent.py --mode qa --skill efficient-web-research
-```
-
-这会使用独立的 `.blog-agent-data/qa-efficient-web-research.json`，启动时显示技能已开启。原始技能已安装在本机 Codex 技能目录；新机器需要先安装相同的已审核版本。该实验将原文和本地工具适配说明加入文章问答请求，不提供网页搜索。详见[试用说明](docs/memory-rag-skill-assessment.md)。
-
-重复同一命令继续测试；中断轮追加 `--resume`。不加技能参数的默认入口仍使用原来的会话。对照实验请使用两个全新的独立 `--state-file`，一组加 `--skill efficient-web-research`，另一组加 `--skill none`，输入相同问题。已有会话不能中途切换技能。
-
 ## 目录
 
 ```text
@@ -79,8 +69,6 @@ python code/evaluate_agent.py --mode offline
 统一离线入口包含博客和原核心回归，无付费模型或远程 MCP 调用。测试文章只在临时目录生成；评测结果保存在被忽略的 `code/eval_results/`。归档 Demo 的 MCP 运行另需 Node.js/npx。
 
 ## 开发资料
-
-- [分层文章记忆运行说明](docs/article-memory-runtime.md)：独立后台、分层摘要/持久预算、总览选章已接入；缺少专用模型配置/额度/密钥时只索引，真实质量仍待验。旧会话显式升级提示后启用新工具。
 
 本项目是实习展示的核心工程项目，关联网站定位为作品集；[项目亮点与简历素材](docs/project-highlights/README.md)持续记录已实现能力、作用、证据和可用简历表述。
 

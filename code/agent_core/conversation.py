@@ -12,7 +12,6 @@ from .state import now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
 from .metrics import field, measured_request
 from .tracing import emit, interrupt_tools
-from .errors import PersistenceError, checkpoint_boundary
 
 
 EXIT_WORDS = {"退出", "请退出", "我要退出", "退出吧", "结束", "结束对话", "退出对话", "结束聊天", "停止对话", "再见", "拜拜", "不聊了", "exit", "quit", "bye", "/exit", "/quit", "q"}
@@ -56,7 +55,6 @@ class Conversation:
         turns = self.state["turns"]
         return turns[-1] if turns and turns[-1]["status"] == "running" else None
 
-    @checkpoint_boundary
     async def introduce(self):
         if self.state["turns"]:
             if self.unfinished_turn:
@@ -67,7 +65,6 @@ class Conversation:
         self.store.save(self.state)
         return await self.resume_turn()
 
-    @checkpoint_boundary
     async def submit(self, text):
         if self.state["status"] == "closed":
             return "closed", ""
@@ -106,7 +103,6 @@ class Conversation:
         self.store.save(self.state)
         return status, ""
 
-    @checkpoint_boundary
     async def resume_turn(self):
         turn = self.unfinished_turn
         if turn is None:
@@ -138,8 +134,6 @@ class Conversation:
                 else:
                     try:
                         await compact_context(self.model_client, state, self.store)
-                    except PersistenceError:
-                        raise
                     except Exception as exc:
                         return self.fail("compact_error", exc)
                 # Compaction swaps the state dictionary contents; obtain live records again.
@@ -198,8 +192,6 @@ class Conversation:
                         if item["call_id"] in seen:
                             raise ValueError(f"Duplicate tool call id: {item['call_id']}")
                         seen.add(item["call_id"])
-                except PersistenceError:
-                    raise
                 except Exception as exc:
                     if (policy is not None and isinstance(exc, (asyncio.TimeoutError, TimeoutError))
                             and request_task is not None and request_task.cancelled()
@@ -214,10 +206,6 @@ class Conversation:
                         emit(state, "run.error", status="model_error", error_type=type(exc).__name__)
                         return policy.fallback("final_generation_failed")
                     return self.fail("model_error", exc, step)
-                if policy is not None and not calls and policy.protocol_text(response.output_text):
-                    step['status'] = 'completed'
-                    step['reasoning'].update(status='unavailable', history_indices=[])
-                    return policy.protocol_failure()
                 if (policy is not None and not calls and turn["kind"] == "user"
                         and policy.retry_answer_shape(response.output_text, step)):
                     continue
@@ -339,9 +327,6 @@ async def _interactive_loop(conversation, first_prompt, *, read_input, write_out
         if conversation.state["close_reason"] == "turn_limit":
             write_output(f"已完成 {max_turns} 轮用户对话，自动退出。")
         return 0
-    if status == 'storage_error':
-        write_output('磁盘上仅最后成功的检查点可用于恢复；本轮最新状态未确认保存。')
-        return 1
     error = conversation.state.get("last_error")
     if error:
         write_output(f"本轮未完成（{status}）：{error['message']}")

@@ -53,7 +53,7 @@ class ConversationStore(StateStore):
             or not 0 <= memory["history_end"] <= len(state["history"])
         ):
             raise ValueError("Invalid conversation summary memory")
-        statuses = {"pending", "running", "waiting_user", "model_error", "compact_error", "max_steps", "interrupted", "closed", "storage_error"}
+        statuses = {"pending", "running", "waiting_user", "model_error", "compact_error", "max_steps", "interrupted", "closed"}
         if state["status"] not in statuses or state["compact_threshold"] < 1:
             raise ValueError("Invalid conversation status or compaction threshold")
         if not 0 <= state["turn_count"] <= state["max_user_turns"]:

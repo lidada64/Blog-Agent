@@ -22,10 +22,6 @@ async def main():
     parser.add_argument("--posts-dir", type=Path, default=DEFAULT_POSTS)
     parser.add_argument("--state-file", type=Path)
     parser.add_argument("--model")
-    parser.add_argument('--article-memory', action=argparse.BooleanOptionalAction, default=True,
-                        help='Ensure an independent scoped memory worker; missing config indexes only')
-    parser.add_argument("--skill", choices=("none", "efficient-web-research"),
-                        help="Opt-in reading experiment for a separate session; omitted retains its saved skill")
     parser.add_argument("--retrieval", choices=("hybrid", "keyword"), default="hybrid",
                         help="Local CPU embeddings with BM25; keyword disables embeddings")
     parser.add_argument("--embedding-python", type=Path,
@@ -40,7 +36,7 @@ async def main():
     parser.add_argument("--turn-timeout", type=int, default=120)
     parser.add_argument("--context-bytes", type=int, default=32000,
                         help="Serialized UTF-8 input budget, not a model token limit")
-    parser.add_argument("--max-output-tokens", type=int, default=8192)
+    parser.add_argument("--max-output-tokens", type=int, default=4096)
     parser.add_argument("--compact-mode", choices=("none", "local", "summary", "standalone"))
     parser.add_argument("--compact-threshold", type=int, default=12000)
     parser.add_argument("--reasoning-effort", choices=EFFORTS)
@@ -55,8 +51,6 @@ async def main():
     group.add_argument("--resume", action="store_true")
     group.add_argument("--new", action="store_true")
     args=parser.parse_args()
-    if args.skill == "efficient-web-research" and args.state_file is None:
-        args.state_file = ROOT / ".blog-agent-data" / f"{args.mode}-efficient-web-research.json"
     if min(args.max_steps, args.max_turns, args.compact_threshold, args.max_tool_calls,
            args.max_searches, args.max_file_searches, args.max_text_searches, args.no_progress_limit,
            args.turn_timeout, args.context_bytes, args.max_output_tokens) < 1:
@@ -91,20 +85,7 @@ async def main():
         store = BlogStore(path, mode=args.mode, posts_dir=args.posts_dir, max_user_turns=args.max_turns)
         state = store.start(args.model or os.getenv("OPENAI_MODEL", "deepseek-flash"),
                             compact_threshold=args.compact_threshold, compact_mode=args.compact_mode,
-                            reasoning_effort=args.reasoning_effort, resume=args.resume, new=args.new, skill=args.skill)
-        memory = None
-        if args.article_memory:
-            from blog_assistant.article_memory_store import ArticleMemoryStore
-            from blog_assistant.article_memory_worker import DEFAULT_DATABASE, ensure_worker
-            from blog_assistant.article_memory_read import ArticleMemoryReader
-            scope = f'{args.mode}:local-v1'
-            with ArticleMemoryStore(DEFAULT_DATABASE) as memory_store:
-                library_id = memory_store.register_library(store.posts_dir, scope)
-            worker = ensure_worker(DEFAULT_DATABASE, library_id)
-            print(f"Article memory: {worker['state']} (generation requires separate maintenance config/budget).")
-            memory = ArticleMemoryReader(DEFAULT_DATABASE,store.posts_dir,scope)
-        if state.get("reading_skill"):
-            print("阅读技能实验已开启：efficient-web-research（本地文章适配，使用会话保存版本）。")
+                            reasoning_effort=args.reasoning_effort, resume=args.resume, new=args.new)
         if not store.prompt_status(state)["current"]:
             print("Saved prompt differs from current guidance; retained. Use --upgrade-prompt after finishing the turn.")
         async with AsyncOpenAI(max_retries=0) as client:
@@ -122,7 +103,7 @@ async def main():
                 retriever = SemanticRetriever(SamplePosts(store.posts_dir), encoder,
                     ROOT / ".blog-agent-data" / "retrieval.sqlite3", mode=store.mode, store=store)
             conversation=create_conversation(client, state, store, max_steps=args.max_steps,
-                                             on_reasoning=hooks.on_reasoning, retrieval_limits=limits, retriever=retriever, memory=memory)
+                                             on_reasoning=hooks.on_reasoning, retrieval_limits=limits, retriever=retriever)
             try:
                 return await interactive_loop(conversation, args.prompt, hooks=hooks)
             finally:
