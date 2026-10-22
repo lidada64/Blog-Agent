@@ -2,10 +2,9 @@
 import copy
 import hashlib
 import json
-import math
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
 from agent_core.context import context_size
 from agent_core.state import now
@@ -15,84 +14,14 @@ from .citations import CITATION_AUDIT_VERSIONS, FAIL_CLOSED_CITATION_VERSIONS, a
 from .section_citations import PROMPT_VERSION, SECTION_PROMPT_VERSIONS, audit_sections
 from .task_context import TaskContextBuilder, enabled as task_context_enabled
 from .answer_contracts import classify, direct_reply, requested_shape, enabled as contracts_enabled
-from .reference_context import MAX_DRAFT_BYTES, validate_repair
+from .reference_context import MAX_DRAFT_BYTES
 from .reading_skill import guidance, overhead
+from .retrieval_budget import RetrievalLimits, validate_checkpoint
 
 
 def read_lines_present(calls):
     return any(c["name"] in {"read_post", "read_post_full"} and c["result"]["data"].get("text") for c in calls)
 
-
-@dataclass(frozen=True)
-class RetrievalLimits:
-    model_requests: int = 8
-    tool_attempts: int = 12
-    searches: int = 2
-    file_searches: int = 2
-    text_searches: int = 3
-    no_progress: int = 2
-    elapsed_seconds: int = 120
-    context_bytes: int = 32000
-    output_tokens: int = 8192
-
-    def __post_init__(self):
-        for key, value in asdict(self).items():
-            if type(value) is not int or value < 1:
-                raise ValueError(f"Retrieval limit {key} must be a positive integer")
-
-
-def validate_checkpoint(state):
-    for turn in state["turns"]:
-        validate_repair(turn)
-        embedding = turn.get("embedding")
-        if embedding is not None:
-            if (not isinstance(embedding, dict) or embedding.get("version") != 1
-                    or not isinstance(embedding.get("model"), str)
-                    or any(type(embedding.get(k)) is not int or embedding[k] < 0
-                           for k in ("batches", "texts", "max_batches", "max_texts"))
-                    or embedding["batches"] > embedding["max_batches"]
-                    or embedding["texts"] > embedding["max_texts"]
-                    or embedding["external_cost"] != 0):
-                raise ValueError("Invalid saved local embedding allowance")
-        budget = turn.get("retrieval")
-        if budget is None:
-            continue
-        if budget.get('phase', 'discovery') not in {'discovery', 'locating', 'reading', 'answering'}:
-            raise ValueError('Invalid retrieval phase')
-        if not isinstance(budget, dict) or type(budget.get("version")) is not int or budget.get("version") not in {1, 2}:
-            raise ValueError("Unsupported retrieval checkpoint")
-        try:
-            limits = RetrievalLimits(**budget.get("limits", {}))
-        except TypeError as exc:
-            raise ValueError("Invalid retrieval checkpoint limits") from exc
-        for key in ("model_requests", "tool_attempts", "searches", "no_progress", "context_peak_bytes"):
-            if type(budget.get(key)) is not int or budget[key] < 0:
-                raise ValueError("Invalid retrieval checkpoint counter")
-        if (budget["model_requests"] > limits.model_requests or budget["tool_attempts"] > limits.tool_attempts
-                or budget["searches"] > limits.searches or budget["context_peak_bytes"] > limits.context_bytes):
-            raise ValueError("Retrieval checkpoint exceeds its saved limits")
-        if budget["version"] == 2:
-            if type(budget.get("recovery_used", False)) is not bool:
-                raise ValueError("Invalid saved retrieval recovery flag")
-            reserve = budget.get("finalization_reserve", 1)
-            if type(reserve) is not int or reserve not in {1, 2} or reserve > limits.model_requests:
-                raise ValueError("Invalid saved finalization reserve")
-            for key in ("file_searches", "text_searches"):
-                if (type(budget.get(key)) is not int or type(budget["limits"].get(key)) is not int
-                        or not 0 <= budget[key] <= budget["limits"][key]):
-                    raise ValueError("Invalid retrieval checkpoint category budget")
-            if type(budget.get("output_retries")) is not int or not 0 <= budget["output_retries"] <= 1:
-                raise ValueError("Invalid retrieval checkpoint retry counter")
-            if type(budget.get("citation_retries", 0)) is not int or not 0 <= budget.get("citation_retries", 0) <= 1:
-                raise ValueError("Invalid retrieval checkpoint citation retry counter")
-        if (type(budget.get("deadline")) not in {int, float} or not math.isfinite(budget["deadline"])
-                or type(budget.get("finalizing")) is not bool
-                or budget.get("route") not in {"catalog", "qa", "help"}
-                or (budget.get("reason") is not None and not isinstance(budget["reason"], str))
-                or not isinstance(budget.get("cache"), dict)
-                or not isinstance(budget.get("seen"), list)
-                or not all(isinstance(i, str) for i in budget["seen"])):
-            raise ValueError("Invalid retrieval checkpoint")
 
 
 class RetrievalPolicy:
@@ -112,10 +41,6 @@ class RetrievalPolicy:
     def initialize(self):
         turn = self.turn
         if "retrieval" not in turn:
-            if self.tools.memory is not None:
-                from .task_context import NEW_TOPIC
-                if NEW_TOPIC.search(turn.get('text','')):
-                    self.state.pop('article_memory_selection',None)
             steps = {s["number"] for s in self.state["steps"] if s.get("turn") == turn["number"]}
             calls = [c for c in self.state["tool_calls"] if c["step"] in steps]
             # Legacy unfinished checkpoints inherit their recorded consumption.
@@ -340,14 +265,6 @@ class RetrievalPolicy:
         if context is None:
             self.start_finalizing(budget.get('reason') or "context_budget")
             return None
-        if self.tools.memory is not None:
-            from .article_memory_read import selection_context
-            selection = selection_context(self.state)
-            if selection:
-                item = {'role':'user', 'content':selection}
-                from agent_core.context import context_size
-                if context_size(context + [item]) <= budget['limits']['context_bytes'] - overhead(self.state):
-                    context.append(item)
         if self.tool_free() and (self.turn.get("projection", {}).get("missing")
                                  or self.turn.get("projection", {}).get("missing_constraints")):
             self.start_finalizing("rewrite_source_unavailable")
@@ -528,14 +445,10 @@ class RetrievalPolicy:
                 budget["recovery_used"] = True
                 self.store.save(self.state)
             if name == "find_text":
-                from agent_core.runner import discovered_paths
+                from .tools import discovered_paths
                 if not set(arguments["paths"]).issubset(discovered_paths(self.state)):
                     raise PolicyDenied("find_text requires paths returned by a completed find_file call")
-            from .article_memory_read import MEMORY_TOOLS
-            if name in MEMORY_TOOLS:
-                # Summary reads revalidate directly; do not run the bounded foreground catalog.
-                version = str(time.time_ns())
-            elif name in {'read_post','read_post_full'} and self.tools.memory is not None:
+            if name in {'read_post', 'read_post_full'}:
                 version = self.tools.posts.snapshot(arguments['post_id'])['version']
             else:
                 version = self.tools.posts.catalog()[2] if name != "read_conversation_history" else str(len(self.state["history"]))
@@ -589,9 +502,6 @@ class RetrievalPolicy:
     @staticmethod
     def identities(name, result):
         data = result["data"]
-        from .article_memory_read import MEMORY_TOOLS
-        if name in MEMORY_TOOLS:
-            return {hashlib.sha256(json.dumps([name,data],sort_keys=True,ensure_ascii=False).encode()).hexdigest()}
         if name in {"read_post", "read_post_full"}:
             records = [data]
         elif name == "list_posts":
@@ -795,22 +705,6 @@ class RetrievalPolicy:
             TaskContextBuilder(self).finish()
 
     def complete_catalog(self):
-        from .article_memory_read import MEMORY_TOOLS, render_memory
-        memory_calls = [c for c in self.current_calls() if c['status']=='completed' and c['name'] in MEMORY_TOOLS]
-        if self.tools.memory is not None and memory_calls:
-            if self.denied_calls() or self.operational_failures():
-                return None
-            try:
-                results = [self.tools.memory.refresh(call['result']['data'], self.state.get('article_memory_selection')) for call in memory_calls]
-            except (OSError, ValueError):
-                return self.finish_reply('文章或摘要版本已变化，请重新读取当前目录。', 'partial', 'memory_stale')
-            for data in results:
-                self.tools.memory.bind(data, self.state)
-            evidence = [{k:data[k] for k in ('post_id','version','generation_version','node_id','evidence_type','source_range')} for data in results]
-            self.turn['derived_evidence'] = evidence[0] if len(evidence)==1 else evidence
-            english = not bool(re.search(r'[\u3400-\u9fff]',self.turn.get('text','')))
-            return self.finish_reply('\n\n---\n\n'.join(render_memory(data,english) for data in results),
-                                     'completed' if all(data['summary'] for data in results) else 'partial', 'article_memory')
         if contracts_enabled(self.state):
             reply = direct_reply(self.state, self.turn)
             if reply is not None:

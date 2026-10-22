@@ -1,12 +1,10 @@
-"""Shared durable conversation loop with an optional compatible Skill adapter."""
+"""Durable conversation loop; applications inject tools and turn policy."""
 
 import asyncio
 import copy
 import logging
 
-from .config import MAX_USER_TURNS
-from .context import HISTORY_TOOLS, compact_context, read_history
-from .local_tools import LOCAL_TOOLS
+from .context import compact_context
 from .runner import finish_pending, json_item
 from .state import now, set_tool_status
 from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
@@ -29,7 +27,6 @@ class Conversation:
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
         self.model_client = model_client
-        self.mcp_client, self.mcp_tools = None, {}
         self.state, self.store = state, store
         self.max_steps = max_steps
         configure_reasoning(state)
@@ -40,7 +37,7 @@ class Conversation:
 
     @property
     def max_user_turns(self):
-        return self.state.get("max_user_turns", MAX_USER_TURNS)
+        return self.state["max_user_turns"]
 
     def append_items(self, items):
         self.state["history"].extend(copy.deepcopy(items))
@@ -124,7 +121,7 @@ class Conversation:
                 set_tool_status(call, "interrupted")
         self.store.save(state)
         try:
-            await finish_pending(state, self.store, self.mcp_client, self.mcp_tools, tool_executor=self.execute_tool)
+            await finish_pending(state, self.store, tool_executor=self.execute_tool)
             request_limit = policy.initialize()["limits"]["model_requests"] if policy is not None else self.max_steps
             for _ in range(request_limit):
                 options = {}
@@ -249,7 +246,7 @@ class Conversation:
                         logging.getLogger(__name__).warning("Reasoning hook failed; checkpoint retained", exc_info=True)
                 if not calls:
                     return state["status"], turn["reply"]
-                await finish_pending(state, self.store, self.mcp_client, self.mcp_tools, tool_executor=self.execute_tool)
+                await finish_pending(state, self.store, tool_executor=self.execute_tool)
             if policy is not None:
                 return policy.fallback("model_budget")
             state["status"] = "max_steps"
@@ -268,26 +265,6 @@ class Conversation:
                 state["steps"][-1]["reasoning"]["status"] = "interrupted"
             self.store.save(state)
             raise
-
-
-class SkillConversation(Conversation):
-    """Compatible Skill application over the shared conversation loop."""
-    def __init__(self, model_client, mcp_client, discovered, state, store, library,
-                 *, max_steps=8, on_reasoning=None):
-        from .mcp_tools import function_schema
-        from .skill_library import LIBRARY_TOOLS
-        mcp_tools = {f"skills_{tool.name}": tool.name for tool in discovered}
-        if "skills_search_skills" not in mcp_tools or "skills_get_skill" not in mcp_tools:
-            raise ValueError("Skill conversations require MCP search_skills and get_skill")
-        async def execute(name, arguments):
-            if name == "read_conversation_history":
-                return read_history(state, arguments["start"], arguments["limit"])
-            return await library.execute(name, arguments, mcp_client, mcp_tools)
-        super().__init__(model_client, state, store,
-            tools=LOCAL_TOOLS + LIBRARY_TOOLS + HISTORY_TOOLS + [
-                function_schema(tool) for tool in sorted(discovered, key=lambda tool: tool.name)],
-            tool_executor=execute, max_steps=max_steps, on_reasoning=on_reasoning)
-        self.mcp_client, self.mcp_tools, self.library = mcp_client, mcp_tools, library
 
 
 async def interactive_loop(conversation, first_prompt=None, *, read_input=input, write_output=print, hooks=None):
@@ -315,7 +292,7 @@ async def interactive_loop(conversation, first_prompt=None, *, read_input=input,
 
 async def _interactive_loop(conversation, first_prompt, *, read_input, write_output, show_reply):
     """Count user turns, not the introduction, tools, blank input or exit commands."""
-    max_turns = conversation.state.get("max_user_turns", MAX_USER_TURNS)
+    max_turns = conversation.state.get("max_user_turns", 10)
     if conversation.state["status"] == "closed":
         write_output("该对话已结束，使用 --new 开始新对话。")
         return 0

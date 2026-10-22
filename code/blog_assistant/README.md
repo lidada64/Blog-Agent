@@ -1,10 +1,12 @@
 # Blog Agent 本机开发说明
 
+2026-10-21：文章分层摘要、选章摘要工具及独立后台已删除，保留 RAG、原文读取与会话约束。旧会话先结束当前轮，再运行 `python code/blog_agent.py --upgrade-prompt`（自定义目录/状态需带原参数），随后重新启动；新会话直接使用新提示。删除的 `--article-memory` / `--no-article-memory` 参数不再接受。历史摘要数据库留存但不再读取。
+
 2026-10-15更新：提示2026-10-15.14分离检索分块与正文引用树，父章节含子节，标题样式规范化、重名用版本绑定ID消歧；引用失败时在同一输入预算中加入具体错误、待修草稿和当前可用来源。清单仅修复时注入，正常问答不增此负担；最多一次修复，失效/撤权/空间不足明确停止，恢复不重置额度。322项离线通过，真实生成另验。旧会话停旧进程后在轮次边界显式升级再启动，原会话未自动修改。
 
 2026-10-14当前实现：[本地语义RAG与回答策略](../../docs/local-semantic-rag.md)。CLI默认本机MiniLM/BM25混合检索，模型已下载；原2026-10-13.13契约保留正常Markdown/文章章节来源与任务记忆，新增运行能力/计算/历史/旧回答改写契约，资料有效时不重查旧答，简短格式有界修复。见[契约修复与验收](../../docs/project-highlights/records-011.md)。旧提示不自动替换，后文 `.10` 的八条/逐行规则属于兼容历史；旧轮先恢复，再显式升级并重启进程。
 
-本轮是 P1 首批迁移 + P2 样例验证片段。Python 继续在 `D:/CST/code/Agent/code/` 演进；不需要搬进博客仓库，也不需要删除旧 Demo。
+2026-10-20 精简后，Python 产品继续在 `D:/CST/code/Agent/code/` 演进；旧 Demo 与 Skill/MCP 专属兼容链已退役。阅读 Skill 与独立文章摘要后台保留。后文带日期的验收数字属于历史结果，不代表本次精简已完成统一验收。
 
 ## 启动
 
@@ -18,8 +20,6 @@ python code/blog_agent.py --new "搜索并阅读有关 Agent 的文章，说明 
 python code/blog_agent.py --resume
 # 独立管理模式会话；当前仍只读，整理与发布尚未实现
 python code/blog_agent.py --mode manage --check-local
-# 旧 Skill Demo 原样保留入口
-python archive/agent_demo/agent_demo.py
 ```
 
 默认读取 `D:/CST/code/Agent/Blog/` 的 Markdown 文章（包括普通子目录）。`--posts-dir` 可覆盖目录。两篇持久样例已删除；离线测试仅在临时目录生成数据，不读取用户文章。正常问答会将检索到的正文片段发送给配置的模型服务。
@@ -63,7 +63,7 @@ python code/blog_agent.py --resume --markdown plain
 - 2026-10-12 多篇真实实验发现旧证据窗口预先只用总 input 字节额度的 2/3，可能在两篇全文实际放得下时仍丢一篇。现优先装入去重的已读证据直到实际 `context_bytes` 上限，再择优保留成对的历史工具调用/返回。新提示词版本 `2026-10-12.3` 要求指定文章读齐后回答，不再为同一全文继续定位；旧会话仍需显式升级。固定两篇对照的运行终态由 0/5 → 1/5（只改证据窗口）→ 4/5（再改提示），但引用行号与版本仍有错位，不能据此称质量达标。
 - 2026-10-13 当前提示词版本 `2026-10-13.10` 要求最多 8 条逐条引用。执行层只对本轮成功读取、仍与当前文章版本一致且不超过 8 行的片段生成规范引用，版本前缀由程序填写；无标记、错位、过宽、失效或格式错误的事实句最多一次无工具重试，仍不合规则从用户可见回答剔除并保留 `citation_unverified` 等异常状态。逐条位置结果保存在当前轮 `citation_audit`；这只是结构与原文定位核验，不判断断言是否被片段语义支持。旧会话保留原提示词/回复行为，需在轮次边界显式升级。
 - 既有 D9 五份双文真实回答可用 `python code/review_blog_citations.py --source d9-multitask-convergence-prompt-20261012 --output <新实验ID>` 整理到忽略目录；`--output <同ID> --score-existing` 仅在人工拆分为原子断言、填写 `atomic_assertion=true`、`citation_reference`、`citation_location_valid=true/false` 和 `manual_support=supported/unsupported/not_claim` 后计算支持率，位置无效不能标为支持。原始自由格式的五份回答均无新标记，之前五份抽查均失败；未标注的 146 行不会自动算成 95% 引用支持率。
-- Blog 用户轮次使用上述本地证据组装，暂不触发远程 summary/standalone 压缩；`--compact-mode` 配置仍保留，旧 Skill 入口原有压缩行为不变。后续 Cache/Compact 实验需单独比较两种机制，不能把这个工程限额算成 token 优化结果。
+- Blog 用户轮次使用上述本地证据组装，暂不触发远程 summary/standalone 压缩；`--compact-mode` 配置仍保留，旧 Skill 入口已退役，通用压缩机制仍保留。后续 Cache/Compact 实验需单独比较两种机制，不能把这个工程限额算成 token 优化结果。
 
 启动示例：
 
@@ -97,24 +97,25 @@ python code/blog_agent.py --max-file-searches 2 --max-searches 2 --max-text-sear
 | 新增业务工具、Schema 与参数校验 | `code/blog_assistant/tools.py` |
 | 模式白名单、执行前权限 | `code/blog_assistant/permissions.py` |
 | 本地检索、正文读取、来源与版本 | `code/blog_assistant/retrieval.py` |
-| 检索进度、持久预算、单轮上下文和程序收尾 | `code/blog_assistant/convergence.py` |
+| 检索进度、单轮上下文、业务编排和程序收尾 | `code/blog_assistant/convergence.py` |
+| 预算限额 schema 与恢复校验 | `code/blog_assistant/retrieval_budget.py` |
+| 生产分词与 BM25 排序 | `code/blog_assistant/ranking.py` |
 | 启动参数、模型配置加载、客户端 | `code/blog_agent.py` |
-| 共用循环、压缩、保存、恢复、指标 | `code/agent_core/`（两种入口共用，改后跑两套回归） |
+| 共用循环、压缩、保存、恢复、指标 | `code/agent_core/`（通用会话与业务层解耦，修改后跑相关回归） |
 | 博客业务测试 / 原核心测试 | `code/test_blog_agent.py` / `code/test_agent*.py` |
 | 评测任务集与既有对照 | `code/evals/` |
-| 原有学习 Demo | `archive/agent_demo/agent_demo.py`、`code/agent_core/cli.py` |
 
 后续再按阶段新增 models.py/workflows.py/blog_client.py，不预搭空壳。博客项目 `D:/CST/code/Carrykit blog2` 负责 admin 页面、登录、正式文章存储、审批与博客接口；共享范围维护在它的 `docs/blog-assistant/README.md`。Python 不直接打开生产 SQLite。
 
 ```mermaid
 flowchart LR
-  Demo[archive/agent_demo/agent_demo.py] --> Skill[SkillConversation 适配]
   Blog[blog_agent.py] --> Business[blog_assistant 权限与本地工具]
-  Skill --> Core[agent_core Conversation 共用循环]
-  Business --> Core
+  Business --> Core[agent_core Conversation 通用循环]
+  Business --> Executor[注入的应用工具执行器]
   Core --> Model[配置的模型服务]
-  Core --> Store[原子会话与工具账本]
-  Core --> Executor[应用工具执行器]
+  Core --> Store[ConversationStore v3 会话与工具账本]
+  Store --> Disk[JsonCheckpointStore 原子落盘]
+  Core --> Executor
 ```
 
 ## 验证

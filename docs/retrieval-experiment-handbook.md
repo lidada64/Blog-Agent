@@ -14,6 +14,8 @@
 
 建议首次开发请求：**“按手册 EXP-0 开发临时语料和统一证据/指标契约，离线复现 D9 并冻结数据集；本轮不调用付费服务。”**
 
+2026-10-20 入口维护：EXP-1/3 纯离线模块、驱动与测试已退役，下面的实验设计和历史结果保留。EXP-0/2、真实博客评测、本地语义质量集继续保留；EXP-1 v2 holdout 仍供 EXP-2 使用。历史额度及测试数字不构成本轮运行授权或验收。
+
 ### 当前可执行与待开发入口
 
 | 项目 | 当前状态 | 使用边界 |
@@ -21,11 +23,11 @@
 | `python code/evaluate_agent.py --mode offline` | 已有 | 统一核心/博客模拟回归；不证明真实回答正确 |
 | `python code/blog_agent.py --help` | 已有 | 核对当前配置；正常 CLI 会调用真实模型，不能随手用于离线实验 |
 | `code/grade_trace.py` | 已有本地规则评分 | 仅对明确选定的实验检查点评分；结构分不能替代语义评审 |
-| evaluate_agent 的 `--mode live` | 已有旧 Skill/Demo 场景 | 不是本手册的 Blog RAG 实验入口，不直接套用 |
+| `python code/evaluate_agent.py --mode checkpoint --state-file <检查点>` | 保留 | 只读结构与显式规则核验；旧 Demo live 已退役 |
 | `python code/evaluate_blog_retrieval.py --split tune` | EXP-0 已有 | 仅合成语料与模拟生成；默认不读取封存集。可用 `--split holdout` 或 `--split all` 做阶段验收，输出到被忽略的 `.blog-agent-data/experiments/exp0-*` |
-| `python code/evaluate_blog_reading.py --split tune` | EXP-1 离线入口已有 | 比较 R0 按行、有界全文、Markdown 章节/段落及 25%/50%/75% 路由；封存集需显式 `--split holdout --frozen-mode auto --frozen-fraction 0.75`，输入仅合成文章 |
-| `python code/evaluate_blog_live.py --help` | D9 单题真实入口已有 | 用户已将原 DeepSeek 持久总账本上限提高到 8 CNY；运行须显式传 `--max-spend-cny 8`，保留历史请求；完整回答、语义质量和实际账单分开判断 |
-| 向量索引、子任务评分 | 待开发 | EXP-2/3 的实验因素，不由离线读取对照暗示已实现 |
+| `python code/evaluate_blog_search.py --split tune` | EXP-2 保留 | 合成语料检索对照；EXP-1 阅读驱动和 EXP-3 子代理驱动均已退役 |
+| `python code/evaluate_blog_live.py --help` | D9 单题真实入口已有 | 显式提供 `--experiment-id`、`--case-file` 和本轮授权的 `--max-spend-cny`；保留历史账本，完整回答、语义质量和实际账单分开判断 |
+| 本地向量/混合检索、子任务评分 | 前者工程实现保留，后者离线模拟退役 | 真实质量与子代理收益分别验收 |
 
 实施位置：文章/检索/策略在 `code/blog_assistant/`；共用计量/恢复在 `code/agent_core/`；固定数据定义和 rubric 在 `code/evals/`；实验运行与样例实例在 `.blog-agent-data/experiments/<experiment-id>/`。具体驱动文件名和 CLI 在 EXP-0 确定并更新此表。避免新增顶层框架或复制已有核心。
 
@@ -84,7 +86,7 @@
 
 初版可试正文约 1k/4k/8k/16k estimated token 的四档；这是取样坐标，不是接受任意 16k 输入的承诺。provider 缺少适配 tokenizer 时明确使用估计，字节上限与已观测 usage 分开报告；不能把字符数除以固定常量当实际计费 token。
 
-## 6. EXP-1：全文、章节、段落的阈值与分支
+## 6. EXP-1：全文、章节、段落的阈值与分支（历史设计，离线驱动已退役）
 
 比较 R0 当前按行读取、R1 有界全文、R2 按 Markdown 章节、R3 多片段/多篇批量读取。文件原有大小限制保持；批量限制总证据量且逐项校验权限。程序内部批量读文件无需创建子 Agent。超长单行、完整代码/表格跨块时有明确处理，不静默破坏语义。
 
@@ -124,7 +126,7 @@
 
 **完成门槛**：每个任务族给出 K1/S1/H1 的召回、回答、引用、费用、耗时和索引成本；结果可选择纯关键词、按任务路由混合或暂不启用语义，不强迫一个全局赢家。测试集不达标或没有可证明收益时保留 K1 路径，记录 S1/H1 失败原因。
 
-## 8. EXP-3：Subagent 单因素对照
+## 8. EXP-3：Subagent 单因素对照（历史设计，离线模拟已退役）
 
 在 EXP-1/2 获得稳定单 Agent 基线后，固定同一检索/证据包/总预算和质量集，比较 A0 单 Agent（包括已经优化的批量/并行工具）、A1 父任务+一个引用核查者、A2 父任务+最多两个独立研究子任务。若独立检索确有价值，另外做端到端检索对照；不能把固定证据核验实验与自主检索实验混为同一收益。若相同小额度内 A2 无法完成，先如实报告，再在预先授权的较大总额度上同时重测 A0/A1/A2，形成质量—成本曲线；不同额度的样本不能当相同资源比较。
 

@@ -10,19 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
-from mcp.types import CallToolResult, Tool
 from openai import AsyncOpenAI
 
-from agent_core.conversation import SkillConversation
+from agent_core.conversation import Conversation
 from agent_core.conversation_state import ConversationStore
 from agent_core.context import compact_context, read_history
 from agent_core.presentation import MarkdownHooks, transcript_markdown
 from agent_core.reasoning import step_reasoning_text
-from agent_core.runner import run_agent
-from agent_core.skill_library import SkillLibrary
-from agent_core.state import StateStore
-from test_agent_conversation import answer, model_with, tool_response
-from test_agent_state import call
+from test_fixtures.conversation import answer, model_with, tool_response, call, TOOLS, INSTRUCTIONS, DOCUMENT, execute_tool, executor_for
 
 
 def reasoning(text, **extra):
@@ -40,14 +35,12 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         root = Path(self.directory.name)
-        self.store = ConversationStore(root / "conversation.json")
-        self.library = SkillLibrary(root / "skills.json")
-        self.state = self.store.start("deepseek-flash", self.library.path, 100000)
-        self.mcp = SimpleNamespace(call_tool=AsyncMock(return_value=CallToolResult(content=[])))
-        self.tools = [Tool(name="search_skills", inputSchema={}), Tool(name="get_skill", inputSchema={})]
+        self.store = ConversationStore(root / "conversation.json", instructions=INSTRUCTIONS)
+        self.state = self.store.start("deepseek-flash", 100000, compact_mode="local")
+        self.executor = AsyncMock(side_effect=executor_for(self.state))
 
     def conversation(self, model, state=None, **kwargs):
-        return SkillConversation(model, self.mcp, self.tools, state or self.state, self.store, self.library, **kwargs)
+        return Conversation(model, state if state is not None else self.state, self.store, tools=TOOLS, tool_executor=self.executor, **kwargs)
 
     async def test_real_sdk_keeps_deepseek_plaintext_and_replays_after_restart(self):
         requests = []
@@ -82,7 +75,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_reasoning_commits_before_display_and_replays_in_order(self):
         raw = reasoning("先检索再回答")
-        first = tool_response(raw, call("skills_search_skills", {"query": "python"}, "search"))
+        first = tool_response(raw, call("lookup", {"query": "python"}, "search"))
         model = model_with(answer("介绍"), first, with_reasoning(answer("完成"), "检索已完成"), answer("下一轮"))
         output = []
 
@@ -115,7 +108,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await interrupted.resume_turn()
         self.assertEqual(self.store.load()["steps"][-1]["reasoning"]["status"], "interrupted")
-        saved = self.store.start("ignored", self.library.path, 1, resume=True, reasoning_effort="none")
+        saved = self.store.start("ignored", 1, resume=True, reasoning_effort="none")
         model = model_with(answer("继续完成"))
         await self.conversation(model, saved).resume_turn()
         self.assertEqual(saved["turn_count"], 1)
@@ -131,7 +124,7 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
     async def test_compaction_keeps_recent_raw_items_and_archives_old_reasoning(self):
         for mode in ("local", "summary"):
             with self.subTest(mode=mode):
-                state = self.store.start("deepseek-flash", self.library.path, 4000, new=True, compact_mode=mode)
+                state = self.store.start("deepseek-flash", 4000, new=True, compact_mode=mode)
                 old = reasoning("旧推理决策 " * 2000)
                 recent = reasoning("近期推理")
                 state["history"] = [{"role": "user", "content": "旧问题"}, old, answer("旧回答").output[0],
@@ -151,17 +144,22 @@ class ReasoningTests(unittest.IsolatedAsyncioTestCase):
                     source = json.loads(model.responses.create.call_args.kwargs["input"][0]["content"])
                     self.assertIn(old, [entry["item"] for entry in source["items"]])
 
-    async def test_legacy_task_replays_reasoning_after_step_limit_resume(self):
-        path = self.store.path.with_name("state.json")
-        raw = reasoning("先搜索")
-        first = model_with(tool_response(raw, call("skills_search_skills", {"query": "python"}, "search")))
-        result = await run_agent(first, self.mcp, self.tools, "查找", "test", 1, state_path=path, reasoning_effort="low")
-        self.assertEqual(result[0], "max_range")
-        second = model_with(answer("完成"))
-        await run_agent(second, self.mcp, self.tools, None, "test", 1, state_path=path, resume=True)
-        self.assertIn(raw, second.responses.create.call_args.kwargs["input"])
-        self.assertEqual(second.responses.create.call_args.kwargs["reasoning"], {"effort": "low"})
-        self.assertEqual(StateStore(path).load()["steps"][0]["reasoning"]["status"], "completed")
+
+    async def test_step_limit_resume_replays_raw_reasoning_and_saved_effort(self):
+        self.state = self.store.start("deepseek-flash", new=True, reasoning_effort="low")
+        raw = reasoning("Search before answering")
+        first = model_with(answer("intro"), tool_response(raw, call("lookup", {"query": "python"}, "search")))
+        conversation = self.conversation(first, max_steps=1)
+        await conversation.introduce()
+        self.assertEqual(await conversation.submit("find"), ("max_steps", ""))
+        saved = self.store.load()
+        second = model_with(answer("done"))
+        await self.conversation(second, saved).resume_turn()
+        request = second.responses.create.call_args.kwargs
+        self.assertIn(raw, request["input"])
+        self.assertEqual(request["reasoning"], {"effort": "low"})
+        self.executor.assert_awaited_once()
+        self.assertEqual(saved["steps"][1]["reasoning"]["status"], "completed")
 
     def test_migration_validation_and_visible_summary_without_ciphertext(self):
         del self.state["reasoning"]

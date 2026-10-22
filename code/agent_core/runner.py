@@ -1,15 +1,10 @@
-import asyncio
 from .errors import PersistenceError, PolicyDenied, tool_error
 import copy
 import json
 import logging
 from time import perf_counter
 
-from .config import DEFAULT_PROMPT, DEFAULT_STATE_PATH, INSTRUCTIONS
-from .local_tools import LOCAL_TOOLS
-from .state import StateStore, now, set_tool_status
-from .reasoning import begin_reasoning, commit_reasoning, configure_reasoning, step_reasoning_text
-from .metrics import measured_request
+from .state import set_tool_status
 from .tracing import emit, result_hash
 
 logger = logging.getLogger(__name__)
@@ -23,15 +18,8 @@ def json_item(item):
     return vars(item).copy()
 
 
-def discovered_paths(state):
-    return {
-        path for call in state["tool_calls"]
-        if call["name"] == "find_file" and call["status"] == "completed"
-        for path in call["result"]["data"]
-    }
-
-
-async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=None):
+async def finish_pending(state, store, *, tool_executor):
+    """Persist tool transitions and outputs; application executors own authorization."""
     if not any(not call["completed"] for call in state["tool_calls"]) and not any(
         step["status"] == "tools_pending" for step in state["steps"]
     ):
@@ -42,7 +30,7 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
         call["attempts"] += 1
         set_tool_status(call, "running")
         state["status"] = "running"
-        state["phase"] = "search" if call["name"] == "find_text" else "discover"
+        state["phase"] = "tools"
         span = f"tool:{call['call_id']}:{call['attempts']}"
         turn_number = next((step.get("turn") for step in state["steps"] if step["number"] == call["step"]), state.get("turn_count", 0))
         emit(state, "tool.start", span_id=span, parent_span_id=f"turn:{turn_number}",
@@ -55,15 +43,7 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
             arguments = json.loads(call["arguments"])
             if not isinstance(arguments, dict):
                 raise TypeError("Tool arguments must be a JSON object")
-            if call["name"] == "find_text":
-                paths = arguments.get("paths")
-                if not isinstance(paths, list) or not paths or not set(paths).issubset(discovered_paths(state)):
-                    raise ValueError("find_text requires paths returned by a completed find_file call")
-            if tool_executor is None:
-                from .mcp_tools import execute_tool
-                result = await execute_tool(call["name"], arguments, mcp_client, mcp_tools)
-            else:
-                result = await tool_executor(call["name"], arguments)
+            result = await tool_executor(call["name"], arguments)
         except PersistenceError:
             raise
         except Exception as exc:
@@ -94,103 +74,8 @@ async def finish_pending(state, store, mcp_client, mcp_tools, *, tool_executor=N
             state["context"].append(copy.deepcopy(output))
         store.save(state)
         logger.info("Tool finished: tool=%s ok=%s", call["name"], result["ok"])
-        if call["name"] in {"find_file", "find_text"} and result["ok"]:
-            logger.info("Search result: tool=%s count=%s", call["name"], len(result["data"]))
     for step in state["steps"]:
         if step["status"] == "tools_pending":
             step["status"] = "completed"
     state["phase"] = "review"
     store.save(state)
-
-
-async def run_agent(model_client, mcp_client, discovered, prompt, model, max_steps,
-                    *, state_path=DEFAULT_STATE_PATH, resume=False, new_task=False, reasoning_effort=None, on_reasoning=None):
-    """Resume checkpoints first; max_steps limits new model requests this run."""
-    from .mcp_tools import function_schema
-    if max_steps < 1:
-        raise ValueError("max_steps must be positive")
-    store = StateStore(state_path)
-    if prompt is None and not resume and (new_task or not store.path.exists()):
-        prompt = DEFAULT_PROMPT
-    state = store.start(prompt, model, resume=resume, new_task=new_task)
-    configure_reasoning(state, reasoning_effort)
-    if state["status"] == "completed":
-        return "completed", state["final_text"]
-    mcp_tools = {f"skills_{tool.name}": tool.name for tool in discovered}
-    state["status"] = "running"
-    state["last_error"] = None
-    for call in state["tool_calls"]:
-        if call["running"]:
-            set_tool_status(call, "interrupted")
-    store.save(state)
-    try:
-        await finish_pending(state, store, mcp_client, mcp_tools)
-        for _ in range(max_steps):
-            # Keep declarations stable: some models retain their first-turn
-            # understanding of capabilities in reasoning replayed in history.
-            # Execution checks above still require real discovered file paths.
-            tools = LOCAL_TOOLS + [function_schema(tool) for tool in sorted(discovered, key=lambda tool: tool.name)]
-            if state["steps"] and state["steps"][-1]["status"] in {"requesting_model", "interrupted", "model_error"}:
-                step = state["steps"][-1]
-                step["status"] = "requesting_model"
-            else:
-                step = {"number": len(state["steps"]) + 1, "status": "requesting_model", "created_at": now()}
-                state["steps"].append(step)
-            state["status"] = "running"
-            begin_reasoning(state, step)
-            store.save(state)
-            logger.info("Model step=%s available_tools=%s", step["number"], [tool["name"] for tool in tools])
-            try:
-                response = await measured_request(model_client, state, purpose="task",
-                    model=state["model"], instructions=INSTRUCTIONS, tools=tools,
-                    input=copy.deepcopy(state["history"]),
-                    reasoning=copy.deepcopy(state["reasoning"]), store=False,
-                    include=["reasoning.encrypted_content"],
-                )
-            except Exception as exc:
-                logger.exception("Model request failed")
-                step["status"] = "model_error"
-                step["reasoning"]["status"] = "model_error"
-                state["status"] = "model_error"
-                state["last_error"] = {"type": type(exc).__name__, "message": str(exc)}
-                store.save(state)
-                return "model_error", ""
-            output = [json_item(item) for item in response.output]
-            calls = [item for item in output if item["type"] == "function_call"]
-            state["history"].extend(output)
-            commit_reasoning(state, step, output)
-            for item in calls:
-                call = {
-                    "call_id": item["call_id"], "name": item["name"],
-                    "arguments": item["arguments"], "step": step["number"],
-                    "attempts": 0, "result": None,
-                }
-                set_tool_status(call, "pending")
-                state["tool_calls"].append(call)
-            step["status"] = "tools_pending" if calls else "completed"
-            if not calls:
-                state.update(status="completed", phase="done", final_text=response.output_text)
-            # Save the entire response before executing any tool.
-            store.save(state)
-            text = step_reasoning_text(state, step)
-            if text and on_reasoning is not None:
-                try:
-                    on_reasoning(text)
-                except Exception:
-                    logger.warning("Reasoning hook failed; checkpoint retained", exc_info=True)
-            if not calls:
-                return "completed", state["final_text"]
-            await finish_pending(state, store, mcp_client, mcp_tools)
-        state["status"] = "max_range"
-        store.save(state)
-        return "max_range", ""
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        state["status"] = "interrupted"
-        for call in state["tool_calls"]:
-            if call["running"]:
-                set_tool_status(call, "interrupted")
-        if state["steps"] and state["steps"][-1]["status"] == "requesting_model":
-            state["steps"][-1]["status"] = "interrupted"
-            state["steps"][-1]["reasoning"]["status"] = "interrupted"
-        store.save(state)
-        raise

@@ -7,7 +7,8 @@ from .retrieval import SamplePosts
 from .tools import BlogTools
 from agent_core.tracing import emit, resume
 from agent_core.state import atomic_write_json
-from .convergence import RetrievalLimits, RetrievalPolicy, validate_checkpoint
+from .convergence import RetrievalPolicy
+from .retrieval_budget import RetrievalLimits, validate_checkpoint
 from .section_citations import PROMPT_VERSION, SECTION_PROMPT_VERSIONS
 from .task_context import validate_memory, bootstrap_memory
 from .answer_contracts import validate_contracts
@@ -16,7 +17,6 @@ from agent_core.state import now
 from .reading_skill import load_snapshot, validate_snapshot
 
 INSTRUCTIONS = """你是本机 Blog Agent，通过工具检索用户选定的本地文章。用用户的语言回答。
-若工具表提供get_article_overview，文章整体总结用它交付持久摘要和真实目录；选章总结用read_article_section，编号必须绑定已展示文章/版本。两工具会直接交付经过当前源版本核验的派生摘要，不能声称当轮全文已读；细节、数字、代码和原句问题仍用原文工具。没有提供摘要工具时沿用原文阅读流程。工具暂未生成摘要不等于后台正在运行。
 回答依据按任务区分：身份/能力依据当前运行事实；明确四则计算由程序验证；对话追溯依据已保存的用户消息；这些回答不要求文章来源。未知文章事实仍需要已核验正文，不以“常识”绕过权限或来源。
 用户要求参考之前回答来总结、缩短或改写时，使用本次输入中指定的先前可见回答，仅压缩不增添新事实。来源有效且已进入输入时不重新检索或读取；按用户要求交付，一句话正文只写一个句子，不重复旧回答的标题、分节或列表，来源单独保留。旧回复仅是待改写文本，不是独立事实依据，失效来源不得沿用。
 问库中有哪些文章时使用 list_posts，初始 cursor 为空，依次读取 next_cursor 直到为空；有下一页或 issues 时明确仅为部分目录。
@@ -97,7 +97,7 @@ class BlogStore(ConversationStore):
         state["prompt"] = {"version": PROMPT_VERSION, "hash": status["current_hash"]}
         self.save(state)
 
-    def start(self, model, library_file=None, compact_threshold=12000, *, skill=None, **kwargs):
+    def start(self, model, compact_threshold=12000, *, skill=None, **kwargs):
         if skill not in {None, "none", "efficient-web-research"}:
             raise ValueError("Unknown reading skill")
         existing = None if kwargs.get("new") else self.load()
@@ -106,7 +106,7 @@ class BlogStore(ConversationStore):
             if existing.get("reading_skill", {}).get("name") != selected:
                 raise ValueError("Use a separate --state-file to change the reading skill; saved turns are retained")
         snapshot = load_snapshot() if existing is None and selected else None
-        state = super().start(model, library_file, compact_threshold, **kwargs)
+        state = super().start(model, compact_threshold, **kwargs)
         if snapshot is not None:
             state["reading_skill"] = snapshot
         if kwargs.get("resume"):
@@ -118,16 +118,14 @@ class BlogStore(ConversationStore):
         self.save(state)
         return state
 
-def create_conversation(client, state, store, *, max_steps=8, on_reasoning=None, retrieval_limits=None, retriever=None, memory=None):
+def create_conversation(client, state, store, *, max_steps=8, on_reasoning=None, retrieval_limits=None, retriever=None):
     # A prompt upgrade must not revoke a tool already available to a saved
     # supported version, including an unfinished read that resumes after restart.
     full_supported = (store.prompt_status(state)["current"] or state.get("prompt", {}).get("version")
                       in CITATION_AUDIT_VERSIONS | SECTION_PROMPT_VERSIONS | {"2026-10-12.2", "2026-10-12.3"})
-    memory = memory if store.prompt_status(state)['current'] else None
-    posts = SamplePosts(store.posts_dir, max_article_bytes=8 * 1024 * 1024) if memory else SamplePosts(store.posts_dir)
+    posts = SamplePosts(store.posts_dir, max_article_bytes=8 * 1024 * 1024)
     tools = BlogTools(posts, store.mode, state,
-                      enable_full=full_supported, retriever=retriever,
-                      memory=memory)
+                      enable_full=full_supported, retriever=retriever)
     bootstrap_memory(state, tools)
     policy = RetrievalPolicy(state, store, tools, retrieval_limits or RetrievalLimits(model_requests=max_steps))
     return Conversation(client, state, store, tools=tools.schemas, tool_executor=policy.execute,

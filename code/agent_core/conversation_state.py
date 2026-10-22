@@ -3,15 +3,13 @@
 import json
 from uuid import uuid4
 
-from .config import DEFAULT_CONVERSATION_PATH, MAX_USER_TURNS, SKILL_SYSTEM_PROMPT
-from .state import StateStore, now
+from .state import JsonCheckpointStore, now
 from .reasoning import configure_reasoning, validate_reasoning
 
 
-class ConversationStore(StateStore):
-    def __init__(self, path=DEFAULT_CONVERSATION_PATH, *, kind="skill_conversation",
-                 instructions=SKILL_SYSTEM_PROMPT, max_user_turns=MAX_USER_TURNS,
-                 introduction="请先向用户介绍你的 Skill 检索、下载录入、本地文件与关键词检索能力和退出方法，然后等待用户输入。"):
+class ConversationStore(JsonCheckpointStore):
+    def __init__(self, path, *, kind="conversation", instructions="", max_user_turns=10,
+                 introduction="Introduce your available capabilities and wait for user input."):
         super().__init__(path)
         if type(max_user_turns) is not int or max_user_turns < 1:
             raise ValueError("max_user_turns must be positive")
@@ -22,12 +20,8 @@ class ConversationStore(StateStore):
         if not self.path.exists():
             return None
         state = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict) or state.get("version") not in {2, 3} or state.get("kind") != self.kind:
+        if not isinstance(state, dict) or state.get("version") != 3 or state.get("kind") != self.kind:
             raise ValueError(f"Not a {self.kind} checkpoint; use the matching entry point")
-        if state["version"] == 2:
-            if self.kind != "skill_conversation":
-                raise ValueError("Only legacy Skill checkpoints support version 2 migration")
-            state.update(version=3, max_user_turns=MAX_USER_TURNS, introduction=self.introduction)
         required = {
             "conversation_id": str, "model": str, "instructions": str, "status": str,
             "history": list, "context": list, "turns": list, "steps": list,
@@ -37,8 +31,6 @@ class ConversationStore(StateStore):
         for key, expected in required.items():
             if type(state.get(key)) is not expected:
                 raise ValueError(f"Invalid conversation field: {key}")
-        if self.kind == "skill_conversation" and not isinstance(state.get("library_file"), str):
-            raise ValueError("Invalid Skill library_file")
         if state["max_user_turns"] < 1:
             raise ValueError("Invalid maximum user turns")
         # Older checkpoints only supported the standalone endpoint. Migrate to
@@ -82,7 +74,7 @@ class ConversationStore(StateStore):
         validate_reasoning(state)
         return state
 
-    def start(self, model, library_file, compact_threshold, *, compact_mode=None, reasoning_effort=None, resume=False, new=False):
+    def start(self, model, compact_threshold=12000, *, compact_mode=None, reasoning_effort=None, resume=False, new=False):
         if compact_mode is not None and compact_mode not in {"none", "local", "summary", "standalone"}:
             raise ValueError("Invalid conversation compaction mode")
         existing = None if new else self.load()
@@ -105,8 +97,6 @@ class ConversationStore(StateStore):
             "compact_mode": compact_mode or "local",
             "close_reason": None,
         }
-        if self.kind == "skill_conversation":
-            state["library_file"] = str(library_file)
         configure_reasoning(state, reasoning_effort)
         self.save(state)
         return state

@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from agent_core.errors import PolicyDenied
 
-READ_TOOLS = frozenset({"list_posts", "search_posts", "read_post", "read_post_full", "find_file", "find_text", "read_conversation_history", "get_article_overview", "read_article_section"})
+READ_TOOLS = frozenset({"list_posts", "search_posts", "read_post", "read_post_full", "find_file", "find_text", "read_conversation_history"})
 # Management preparation/publishing is deliberately not registered in this slice.
 MODE_TOOLS = {"qa": READ_TOOLS, "manage": READ_TOOLS}
 

@@ -1,6 +1,8 @@
 # 压缩、缓存和费用对比
 
-## 显式压缩如何工作
+2026-10-20 维护：`compare_compression.py` 及费用计算保留；旧 Demo、SkillConversation、SkillLibrary 和 `benchmark_compression.py` 已退役。下文显式压缩与自动实测段落记录历史机制/实验，不是当前产品运行命令。Blog 业务使用自己的证据输入投影，不能把旧 Demo 压缩结果当作当前 Blog 收益。本次精简未在此声明新的测试结果。
+
+## 历史显式压缩机制（旧 Demo 入口已退役）
 
 standalone 端点不可用，并不影响 local 或 summary。主对话每次请求前调用 compact_context 检查 input 大小，程序主动替换工作上下文，所以属于显式压缩，不依赖模型偷偷截断或服务端隐式压缩。
 
@@ -11,7 +13,8 @@ standalone 端点不可用，并不影响 local 或 summary。主对话每次请
 
 完整 history 留在本地，压缩仅替换 context。新记忆是有损的，模型可以通过 read_conversation_history 或重读已收藏文档恢复精确资料。默认阈值 12,000 为序列化 UTF-8 字节，不能当作 token；显式开启 summary 时用 --compact-mode summary。
 
-```powershell
+```text
+# 历史命令，已退役
 python archive/agent_demo/agent_demo.py --new --compact-mode none
 python archive/agent_demo/agent_demo.py --new --compact-mode local
 python archive/agent_demo/agent_demo.py --new --compact-mode summary
@@ -27,7 +30,7 @@ python archive/agent_demo/agent_demo.py --new --compact-mode summary
 | 输入，缓存未命中 | 1 | 2 |
 | 输出 | 4 | 8 |
 
-当前 deepseek-flash 是 DeepSeek-V4.1-Flash；旧别名 deepseek-v4-flash 由该模型提供服务。高峰为北京时间周一至周五（不含中国法定节假日）09:00–12:00、14:00–18:00，其余为闲时。工具要求明确 --profile，不自行猜测节假日；跨时段的整批用量应分批计算。价格是可编辑快照，使用前按官方页面更新；脚本不声称永远是最新价格。
+当时记录的 deepseek-flash 是 DeepSeek-V4.1-Flash；旧别名 deepseek-v4-flash 由该模型提供服务。高峰为北京时间周一至周五（不含中国法定节假日）09:00–12:00、14:00–18:00，其余为闲时。工具要求明确 --profile，不自行猜测节假日；跨时段的整批用量应分批计算。价格是可编辑快照，使用前按官方页面更新；脚本不声称永远是最新价格。
 
 费用公式：
 
@@ -68,15 +71,16 @@ python code/compare_compression.py --baseline path/to/none.json --compressed pat
 
 价格 JSON 可换成其他模型或自定义价格，要求 currency、unit_tokens、profiles；每个 profile 提供 cached_input、uncached_input、output 三个非负单价。金额用十进制计算。
 
-## 自动实测压缩效果
+## 历史自动实测压缩效果（驱动已退役）
 
-```powershell
+```text
+# 历史命令，已退役
 python code/benchmark_compression.py --profile off_peak --repeat 2
 # 只比较 local，降低测试用量：
 python code/benchmark_compression.py --profile off_peak --compressed-modes local --repeat 2
 ```
 
-会真实调用现有配置的模型，消耗 API 用量。测试使用生产 SkillConversation、压缩实现和真实本地 SkillLibrary；模型可使用生产工具，但远程 MCP 在此固定资料测试中被禁止，避免远程目录变化导致无法比较。测试不依赖 standalone、不修改根目录会话或收藏库。
+当时会真实调用配置的模型并消耗 API 用量。历史测试使用当时的 SkillConversation、压缩实现和本地 SkillLibrary；模型可使用生产工具，但远程 MCP 在此固定资料测试中被禁止，避免远程目录变化导致无法比较。测试不依赖 standalone、不修改根目录会话或收藏库。
 
 每个实验组使用相同系统指令、工具声明、用户消息、固定长文档和推理 effort（默认 high）。不同组只改变 compact_mode，每次从新会话开始。测试先记住代号与预算，再读取两个长文档，最后检查早期事实和埋在旧文档中间的验收标记。长工具结果让压缩确实有机会触发；压缩组要求至少一次成功替换，并通过原始证据、工具顺序及回复检查。没有压缩或遗忘事实均记 FAIL，不会凭 token 变少认定成功。
 

@@ -1,9 +1,8 @@
-"""Offline behavior tests for conversations, downloads, compaction and recovery."""
+"""Offline behavior tests for conversations, injected tools, compaction and recovery."""
 
 import asyncio
 import copy
 import json
-import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,60 +10,28 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from mcp import StdioServerParameters
-from mcp.types import CallToolResult, TextContent
 from openai import AsyncOpenAI
 
-from agent_core.config import SKILL_SYSTEM_PROMPT
 from agent_core.context import compact_context
-from agent_core.conversation import SkillConversation, interactive_loop
+from agent_core.conversation import Conversation, interactive_loop
 from agent_core.conversation_state import ConversationStore
-from agent_core.mcp_connection import connect_mcp
-from agent_core.mcp_tools import discover_skill_tools
-from agent_core.skill_library import SkillLibrary
-from agent_core.state import StateStore
-from test_agent_state import call
+from test_fixtures.conversation import answer, model_with, tool_response, call, TOOLS, INSTRUCTIONS, DOCUMENT, execute_tool, executor_for
 
 
-def answer(text, *, status="completed"):
-    return SimpleNamespace(status=status, output_text=text, output=[{
-        "type": "message", "role": "assistant", "status": "completed",
-        "content": [{"type": "output_text", "text": text, "annotations": []}],
-    }])
-
-
-def tool_response(*calls):
-    return SimpleNamespace(status="completed", output_text="", output=list(calls))
-
-
-def model_with(*responses):
-    return SimpleNamespace(responses=SimpleNamespace(
-        create=AsyncMock(side_effect=list(responses)), compact=AsyncMock(),
-    ))
-
-
-DOCUMENT = "# Python Testing\nSource: fixture\n\n---\n\n---\nname: python-testing\n---\nUse PyTest to test Python code.\n"
-
-
-class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
+class ConversationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.store = ConversationStore(self.root / "conversation.json")
-        self.library = SkillLibrary(self.root / "skills.json")
-        self.state = self.store.start("test", self.library.path, 12000, compact_mode="standalone")
-        self.client = SimpleNamespace(call_tool=AsyncMock(return_value=CallToolResult(
-            content=[TextContent(type="text", text=DOCUMENT)],
-        )))
-        from mcp.types import Tool
-        self.discovered = [Tool(name="search_skills", inputSchema={}), Tool(name="get_skill", inputSchema={})]
+        self.store = ConversationStore(self.root / "conversation.json", instructions=INSTRUCTIONS)
+        self.state = self.store.start("test", 12000, compact_mode="standalone")
+        self.executor = AsyncMock(side_effect=executor_for(self.state))
 
     def conversation(self, model, state=None, **kwargs):
-        return SkillConversation(model, self.client, self.discovered, state or self.state, self.store, self.library, **kwargs)
+        return Conversation(model, state if state is not None else self.state, self.store, tools=TOOLS, tool_executor=self.executor, **kwargs)
 
     async def test_intro_then_ten_user_turns_and_no_eleventh_request(self):
-        model = model_with(answer("可以检索、下载和查询 Skill"), *(answer(f"回复 {i}") for i in range(10)))
+        model = model_with(answer("可以读取测试记录"), *(answer(f"回复 {i}") for i in range(10)))
         inputs = iter([f"问题 {i}" for i in range(12)])
         output = []
         conversation = self.conversation(model)
@@ -75,7 +42,7 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state["close_reason"], "turn_limit")
         self.assertEqual(model.responses.create.await_count, 11)
         self.assertEqual(model.responses.create.call_args_list[0].kwargs["tools"], [])
-        self.assertEqual(model.responses.create.call_args_list[0].kwargs["instructions"], SKILL_SYSTEM_PROMPT)
+        self.assertEqual(model.responses.create.call_args_list[0].kwargs["instructions"], INSTRUCTIONS)
         self.assertIn("自动退出", output[-1])
         self.assertEqual(self.store.load()["turn_count"], 10)
         self.assertEqual(await conversation.submit("额外问题"), ("closed", ""))
@@ -92,102 +59,13 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         await interactive_loop(self.conversation(model_with(answer("介绍"))), read_input=lambda _: (_ for _ in ()).throw(EOFError()), write_output=lambda _: None)
         self.assertEqual(self.store.load()["close_reason"], "eof")
 
-    async def test_multiple_tools_are_one_user_turn_and_download_uses_mcp_content(self):
-        model = model_with(answer("介绍"),
-            tool_response(call("skills_search_skills", {"query": "python"}, "search")),
-            tool_response(call("download_skill", {"id": "python-testing"}, "save")),
-            answer("已录入"),
-            tool_response(call("search_saved_skills", {"query": "pytest"}, "local")),
-            answer("找到已下载的 Skill"))
-        conversation = self.conversation(model)
-        await conversation.introduce()
-        self.assertEqual(await conversation.submit("搜索并下载 Python testing"), ("waiting_user", "已录入"))
-        self.assertEqual(self.state["turn_count"], 1)
-        self.assertEqual(self.library.read("python-testing")["data"]["content"], DOCUMENT)
-        await conversation.submit("查询本地 pytest")
-        self.assertEqual(self.state["turn_count"], 2)
-        local = self.state["tool_calls"][-1]["result"]
-        self.assertEqual(local["data"][0]["id"], "python-testing")
-        self.assertEqual(self.state["history"], self.state["context"])
-        second_user_input = model.responses.create.call_args_list[4].kwargs["input"]
-        self.assertIn({"role": "user", "content": "搜索并下载 Python testing"}, second_user_input)
 
-    async def test_local_file_and_keyword_tools_are_declared_and_run_in_order(self):
-        """Regression: the conversation must expose find_file/find_text, not only Skill tools."""
-        target = self.root / "1.txt"
-        target.write_text("first\nlidada\nlast lidada\n", encoding="utf-8")
-        patcher = patch("agent_core.local_tools.ROOT", self.root)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
-        model = model_with(
-            answer("介绍"),
-            tool_response(call("find_file", {"name": "1.txt"}, "files")),
-            tool_response(call("find_text", {"paths": [str(target)], "text": "lidada"}, "text")),
-            answer("找到 2 处"),
-        )
-        conversation = self.conversation(model)
-        declared = {tool["name"] for tool in conversation.tools}
-        self.assertIn("find_file", declared)
-        self.assertIn("find_text", declared)
-        self.assertIn("search_saved_skills", declared)
 
-        inputs = iter(["在工作区找 1.txt 并搜索 lidada", "退出"])
-        await interactive_loop(conversation, read_input=lambda _: next(inputs), write_output=lambda _: None)
 
-        # The model must actually receive both tools on a real user turn, not just hold them.
-        turn_tools = {tool["name"] for tool in model.responses.create.call_args_list[1].kwargs["tools"]}
-        self.assertIn("find_file", turn_tools)
-        self.assertIn("find_text", turn_tools)
-        self.assertEqual([c["name"] for c in self.state["tool_calls"]], ["find_file", "find_text"])
-        self.assertEqual([c["status"] for c in self.state["tool_calls"]], ["completed", "completed"])
-        self.assertEqual(
-            [hit["line_number"] for hit in self.state["tool_calls"][1]["result"]["data"]], [2, 3],
-        )
-        # Local file search never reaches the Skill MCP server.
-        self.client.call_tool.assert_not_awaited()
-
-    async def test_find_text_rejects_paths_that_find_file_never_returned(self):
-        target = self.root / "1.txt"
-        target.write_text("lidada\n", encoding="utf-8")
-        patcher = patch("agent_core.local_tools.ROOT", self.root)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        model = model_with(
-            answer("介绍"),
-            tool_response(call("find_text", {"paths": [str(target)], "text": "lidada"}, "text")),
-            answer("无法检索"),
-        )
-        conversation = self.conversation(model)
-        await conversation.introduce()
-        await conversation.submit("直接搜索 lidada")
-
-        call_record = self.state["tool_calls"][0]
-        self.assertEqual(call_record["status"], "failed")
-        self.assertIn("completed find_file call", call_record["result"]["error"]["message"])
-
-    async def test_library_is_searchable_after_restart_and_download_is_idempotent(self):
-        await self.library.download("python-testing", self.client, {"skills_get_skill": "get_skill"})
-        reloaded = SkillLibrary(self.library.path)
-        result = await reloaded.download("python-testing", self.client, {"skills_get_skill": "get_skill"})
-        self.assertTrue(result["already_saved"])
-        self.client.call_tool.assert_awaited_once_with("get_skill", arguments={"id": "python-testing"})
-        self.assertEqual(reloaded.search("PYTHON pytest")["count"], 1)
-        self.assertEqual(reloaded.search("missing")["count"], 0)
-        self.assertEqual(reloaded.search("")["count"], 1)
-
-    async def test_mcp_error_or_empty_content_is_not_saved(self):
-        self.client.call_tool.return_value = CallToolResult(content=[], isError=True)
-        self.assertFalse((await self.library.download("bad", self.client, {"skills_get_skill": "get_skill"}))["ok"])
-        self.assertFalse(self.library.path.exists())
-        self.client.call_tool.return_value = CallToolResult(content=[])
-        with self.assertRaisesRegex(ValueError, "no Skill document"):
-            await self.library.download("bad", self.client, {"skills_get_skill": "get_skill"})
-        self.assertFalse(self.library.path.exists())
 
     async def test_compaction_preserves_entire_window_history_ledger_and_system_prompt(self):
-        model = model_with(answer("介绍"), tool_response(call("download_skill", {"id": "python-testing"}, "save")), answer("保存成功"))
+        model = model_with(answer("介绍"), tool_response(call("lookup", {"query": "python-testing"}, "save")), answer("保存成功"))
         conversation = self.conversation(model)
         await conversation.introduce()
         self.state["compact_threshold"] = 1
@@ -197,7 +75,7 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         model.responses.compact.return_value = SimpleNamespace(id="compact_test", output=window)
         await conversation.submit("下载 python-testing")
         self.assertEqual(model.responses.create.call_args.kwargs["input"], window)
-        self.assertEqual(model.responses.compact.call_args.kwargs["instructions"], SKILL_SYSTEM_PROMPT)
+        self.assertEqual(model.responses.compact.call_args.kwargs["instructions"], INSTRUCTIONS)
         compact_input = model.responses.compact.call_args.kwargs["input"]
         self.assertEqual(compact_input[-1]["type"], "function_call_output")
         self.assertEqual(compact_input[-1]["call_id"], "save")
@@ -240,7 +118,7 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_incomplete_or_empty_response_does_not_finish_turn(self):
         for response in (answer("partial", status="incomplete"), answer("")):
             with self.subTest(response=response.output_text):
-                state = self.store.start("test", self.library.path, 12000, new=True)
+                state = self.store.start("test", 12000, new=True)
                 conversation = self.conversation(model_with(answer("介绍"), response), state)
                 await conversation.introduce()
                 self.assertEqual(await conversation.submit("查询"), ("model_error", ""))
@@ -249,8 +127,8 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
                 await self.conversation(model_with(answer("完整回复")), self.store.load()).resume_turn()
                 self.assertEqual(self.store.load()["turn_count"], 1)
 
-    async def test_step_limit_resume_finishes_turn_without_repeating_download(self):
-        first = model_with(answer("介绍"), tool_response(call("download_skill", {"id": "python-testing"}, "save")))
+    async def test_step_limit_resume_finishes_turn_without_repeating_tool(self):
+        first = model_with(answer("介绍"), tool_response(call("lookup", {"query": "python-testing"}, "save")))
         conversation = self.conversation(first, max_steps=1)
         await conversation.introduce()
         self.assertEqual(await conversation.submit("下载"), ("max_steps", ""))
@@ -258,7 +136,7 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         resumed = self.conversation(second, self.store.load())
         await resumed.introduce()
         self.assertEqual(resumed.state["turn_count"], 1)
-        self.client.call_tool.assert_awaited_once()
+        self.executor.assert_awaited_once()
         self.assertEqual(second.responses.create.call_args.kwargs["input"][-1]["call_id"], "save")
 
     async def test_failed_tenth_turn_resumes_then_closes_without_an_eleventh_turn(self):
@@ -284,33 +162,6 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
             await compact_context(model, self.state, self.store, force=True)
         model.responses.compact.assert_not_awaited()
 
-    async def test_crash_after_library_write_before_checkpoint_recovers_without_refetch(self):
-        class ProcessKilled(BaseException):
-            pass
-
-        model = model_with(answer("介绍"), tool_response(call("download_skill", {"id": "python-testing"}, "save")))
-        conversation = self.conversation(model)
-        await conversation.introduce()
-        save = StateStore.save
-
-        def fail_after_download(store, state):
-            if any(call["completed"] for call in state["tool_calls"]):
-                raise ProcessKilled()
-            save(store, state)
-
-        with patch.object(ConversationStore, "save", fail_after_download):
-            with self.assertRaises(ProcessKilled):
-                await conversation.submit("下载")
-        saved = self.store.load()
-        self.assertTrue(saved["tool_calls"][0]["running"])
-        self.assertTrue(self.library.path.exists())
-        second = model_with(answer("已保存"))
-        resumed = self.conversation(second, saved)
-        await resumed.resume_turn()
-        self.client.call_tool.assert_awaited_once()
-        self.assertEqual(saved["tool_calls"][0]["attempts"], 2)
-        self.assertTrue(saved["tool_calls"][0]["result"]["already_saved"])
-        self.assertEqual(sum(item.get("type") == "function_call_output" for item in saved["history"]), 1)
 
     async def test_cancel_model_preserves_turn_and_resume_does_not_add_another(self):
         first = model_with(answer("介绍"), asyncio.CancelledError())
@@ -322,29 +173,12 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         await self.conversation(model_with(answer("继续")), self.store.load()).resume_turn()
         self.assertEqual(self.store.load()["turn_count"], 1)
 
-    def test_corrupt_library_or_conversation_is_not_silently_replaced(self):
-        self.library.path.write_text("{broken", encoding="utf-8")
-        with self.assertRaises(ValueError):
-            self.library.search("python")
-        self.assertEqual(self.library.path.read_text(encoding="utf-8"), "{broken")
+    def test_corrupt_conversation_is_not_silently_replaced(self):
         del self.state["context"]
         self.store.save(self.state)
         with self.assertRaisesRegex(ValueError, "context"):
             self.store.load()
 
-    async def test_actual_stdio_mcp_download_and_local_query(self):
-        parameters = StdioServerParameters(command=sys.executable, args=[str(Path(__file__).parent / "test_fixtures" / "skills_server.py")])
-        async with connect_mcp(parameters) as client:
-            discovered = await discover_skill_tools(client)
-            model = model_with(answer("介绍"),
-                tool_response(call("skills_search_skills", {"query": "python"}, "search")),
-                tool_response(call("download_skill", {"id": "python-testing"}, "save")), answer("已保存"))
-            conversation = SkillConversation(model, client, discovered, self.state, self.store, self.library)
-            await conversation.introduce()
-            await conversation.submit("搜索并下载 Python testing")
-        self.assertEqual(self.state["tool_calls"][0]["result"]["ok"], True)
-        self.assertEqual(self.library.search("pytest")["count"], 1)
-        self.assertIn("Write meaningful pytest tests", self.library.read("python-testing")["data"]["content"])
 
     async def test_real_openai_sdk_uses_standalone_compact_http_route_and_replays_window(self):
         requests = []
@@ -374,7 +208,7 @@ class SkillConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([path for path, _ in requests], ["/v1/responses", "/v1/responses/compact", "/v1/responses"])
         self.assertEqual(requests[2][1]["input"], window)
         self.assertFalse(requests[2][1]["store"])
-        self.assertEqual(requests[2][1]["instructions"], SKILL_SYSTEM_PROMPT)
+        self.assertEqual(requests[2][1]["instructions"], INSTRUCTIONS)
 
 
 if __name__ == "__main__":

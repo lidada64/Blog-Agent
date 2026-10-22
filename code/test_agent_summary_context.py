@@ -8,14 +8,11 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from mcp.types import CallToolResult, TextContent, Tool
 
 from agent_core.context import compact_context, context_size
-from agent_core.conversation import SkillConversation
+from agent_core.conversation import Conversation
 from agent_core.conversation_state import ConversationStore
-from agent_core.skill_library import SkillLibrary
-from test_agent_conversation import answer, model_with, tool_response, DOCUMENT
-from test_agent_state import call
+from test_fixtures.conversation import answer, model_with, tool_response, call, TOOLS, INSTRUCTIONS, DOCUMENT, execute_tool, executor_for
 
 
 class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
@@ -23,14 +20,12 @@ class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.store = ConversationStore(self.root / "conversation.json")
-        self.library = SkillLibrary(self.root / "skills.json")
-        self.state = self.store.start("deepseek-flash", self.library.path, 4000, compact_mode="summary")
-        self.mcp = SimpleNamespace(call_tool=AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text=DOCUMENT)])))
-        self.tools = [Tool(name="search_skills", inputSchema={}), Tool(name="get_skill", inputSchema={})]
+        self.store = ConversationStore(self.root / "conversation.json", instructions=INSTRUCTIONS)
+        self.state = self.store.start("deepseek-flash", 4000, compact_mode="summary")
+        self.executor = AsyncMock(side_effect=executor_for(self.state))
 
-    def conversation(self, model, state=None):
-        return SkillConversation(model, self.mcp, self.tools, state or self.state, self.store, self.library)
+    def conversation(self, model, state=None, **kwargs):
+        return Conversation(model, state if state is not None else self.state, self.store, tools=TOOLS, tool_executor=self.executor, **kwargs)
 
     async def populate_old_turns(self, conversation):
         await conversation.introduce()
@@ -90,9 +85,9 @@ class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_summary_keeps_context_and_resumes_the_same_user_turn(self):
         for bad in (answer("", status="completed"), answer("半段摘要", status="incomplete"),
-                    tool_response(call("download_skill", {"id": "python-testing"}, "wrong"))):
+                    tool_response(call("lookup", {"query": "python-testing"}, "wrong"))):
             with self.subTest(response=bad.output_text):
-                self.state = self.store.start("deepseek-flash", self.library.path, 4000, compact_mode="summary", new=True)
+                self.state = self.store.start("deepseek-flash", 4000, compact_mode="summary", new=True)
                 model = model_with(answer("介绍"), answer("旧资料 " * 3000), answer("第二轮"), bad)
                 conversation = self.conversation(model)
                 await self.populate_old_turns(conversation)
@@ -108,7 +103,7 @@ class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recent_tool_calls_and_results_survive_summary_replacement(self):
         model = model_with(answer("介绍"), answer("旧资料 " * 3000),
-                           tool_response(call("download_skill", {"id": "python-testing"}, "save")), answer("第二轮已保存"),
+                           tool_response(call("lookup", {"query": "python-testing"}, "save")), answer("第二轮已保存"),
                            answer("第一轮资料摘要。"), answer("第三轮继续"))
         conversation = self.conversation(model)
         await conversation.introduce()
@@ -120,7 +115,7 @@ class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["call_id"] for item in window if item.get("type") == "function_call"], ["save"])
         self.assertEqual([item["call_id"] for item in window if item.get("type") == "function_call_output"], ["save"])
         self.assertEqual(self.state["tool_calls"], original_calls)
-        self.assertEqual(self.library.search("pytest")["count"], 1)
+        self.assertEqual(self.executor.await_count, 1)
 
     async def test_save_failure_keeps_input_list_and_previous_summary(self):
         model = model_with(answer("介绍"), answer("旧资料 " * 3000), answer("第二轮"), answer("摘要"))
@@ -147,7 +142,7 @@ class SummaryContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.state["model_requests"]), len(original["model_requests"]) + 1)
 
     def test_resume_can_switch_to_summary_and_reject_invalid_memory(self):
-        resumed = self.store.start("deepseek-flash", self.library.path, 4000, compact_mode="summary", resume=True)
+        resumed = self.store.start("deepseek-flash", 4000, compact_mode="summary", resume=True)
         self.assertEqual(resumed["compact_mode"], "summary")
         resumed["summary_memory"] = {"text": "bad", "history_end": -1}
         self.store.save(resumed)

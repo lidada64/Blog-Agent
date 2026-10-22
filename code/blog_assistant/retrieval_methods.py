@@ -1,28 +1,54 @@
 """Offline EXP-2 chunk and ranking contracts; no embedding network access."""
 
 import math
-import re
-from collections import Counter
+from .ranking import rank_bm25, terms
 
 from .experiment import digest, evidence
-from .reading_experiment import as_evidence, units
+
+
+def units(body, mode):
+    """Split at headings or blank lines without splitting fenced code or table rows."""
+    lines = body.splitlines()
+    if mode == "full":
+        return [(1, len(lines), body, None)]
+    groups = []
+    start = 1
+    fence = False
+    for index, line in enumerate(lines, 1):
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        boundary = (mode == "section" and line.startswith("#") and not fence and index > start
+                    or mode == "paragraph" and not line.strip() and not fence and index > start)
+        if boundary:
+            segment = "\n".join(lines[start - 1:index - 1]).strip("\n")
+            if segment.strip():
+                groups.append((start, index - 1, segment, None))
+            start = index + (1 if mode == "paragraph" else 0)
+    if start <= len(lines):
+        segment = "\n".join(lines[start - 1:]).strip("\n")
+        if segment.strip():
+            groups.append((start, len(lines), segment, None))
+    return groups
+
+
+def as_evidence(post, article_id, unit, mode, article_complete):
+    start, end, text, section = unit
+    return {"article_id": article_id,
+            "chunk_id": f"{article_id}:{post['version'][:12]}:{start}-{end}",
+            "title": post["title"], "section": section,
+            "source": post["source"], "version": post["version"],
+            "visibility": post["visibility"], "start_line": start, "end_line": end,
+            "text": text, "characters": len(text), "utf8_bytes": len(text.encode("utf-8")),
+            "token_count": None, "token_method": "unobserved; UTF-8 bytes recorded separately",
+            "mode": mode, "complete": True, "article_complete": article_complete,
+            "incomplete_reason": None, "next_line": None}
+
 
 
 def estimated_tokens(text):
     """A sampling coordinate, never a provider token or billing count."""
     return max(1, (len(text.encode("utf-8")) + 3) // 4)
 
-
-def terms(text):
-    result = []
-    for part in re.findall(r"[a-z0-9_]+|[\u3400-\u9fff]+", text.casefold()):
-        if "\u3400" <= part[0] <= "\u9fff":
-            result.extend(part[index:index + 2] for index in range(len(part) - 1))
-            if len(part) == 1:
-                result.append(part)
-        elif len(part) > 1:
-            result.append(part)
-    return result
 
 
 def chunks_for_post(post, article_id, target_tokens=300):
@@ -75,36 +101,6 @@ def build_chunks(posts, target_tokens=300):
                                      for chunk in chunks] + [target_tokens]),
             "token_method": "estimated from UTF-8 bytes/4; not provider usage"}
 
-
-def rank_bm25(chunks, query, top_k=5, per_article=2):
-    if not 1 <= top_k <= 20 or not 1 <= per_article <= top_k:
-        raise ValueError("Invalid ranking limits")
-    query_terms = set(terms(query))
-    docs = [Counter(terms(chunk["title"] + " " + (chunk["section"] or "") + " " + chunk["text"]))
-            for chunk in chunks]
-    lengths = [sum(doc.values()) for doc in docs]
-    mean_length = sum(lengths) / len(lengths) if lengths else 1
-    frequency = Counter(term for doc in docs for term in doc)
-    ranked = []
-    for chunk, doc, length in zip(chunks, docs, lengths):
-        score = 0.0
-        for term in query_terms:
-            tf = doc[term]
-            if not tf:
-                continue
-            idf = math.log1p((len(chunks) - frequency[term] + 0.5) / (frequency[term] + 0.5))
-            score += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * length / mean_length))
-        if score > 0:
-            ranked.append((score, chunk))
-    ranked.sort(key=lambda pair: (-pair[0], pair[1]["article_id"], pair[1]["start_line"]))
-    selected, counts = [], Counter()
-    for score, chunk in ranked:
-        if counts[chunk["article_id"]] < per_article:
-            selected.append({"score": score, "chunk": chunk})
-            counts[chunk["article_id"]] += 1
-        if len(selected) == top_k:
-            break
-    return selected
 
 
 def rank_historical(posts, query, top_k=5):

@@ -10,7 +10,7 @@ from agent_core.reasoning import EFFORTS
 from blog_assistant.session import BlogStore, create_conversation
 from blog_assistant.retrieval import SamplePosts
 from blog_assistant.tools import BlogTools
-from blog_assistant.convergence import RetrievalLimits
+from blog_assistant.retrieval_budget import RetrievalLimits
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POSTS = ROOT / "Blog"
@@ -22,8 +22,6 @@ async def main():
     parser.add_argument("--posts-dir", type=Path, default=DEFAULT_POSTS)
     parser.add_argument("--state-file", type=Path)
     parser.add_argument("--model")
-    parser.add_argument('--article-memory', action=argparse.BooleanOptionalAction, default=True,
-                        help='Ensure an independent scoped memory worker; missing config indexes only')
     parser.add_argument("--skill", choices=("none", "efficient-web-research"),
                         help="Opt-in reading experiment for a separate session; omitted retains its saved skill")
     parser.add_argument("--retrieval", choices=("hybrid", "keyword"), default="hybrid",
@@ -92,17 +90,6 @@ async def main():
         state = store.start(args.model or os.getenv("OPENAI_MODEL", "deepseek-flash"),
                             compact_threshold=args.compact_threshold, compact_mode=args.compact_mode,
                             reasoning_effort=args.reasoning_effort, resume=args.resume, new=args.new, skill=args.skill)
-        memory = None
-        if args.article_memory:
-            from blog_assistant.article_memory_store import ArticleMemoryStore
-            from blog_assistant.article_memory_worker import DEFAULT_DATABASE, ensure_worker
-            from blog_assistant.article_memory_read import ArticleMemoryReader
-            scope = f'{args.mode}:local-v1'
-            with ArticleMemoryStore(DEFAULT_DATABASE) as memory_store:
-                library_id = memory_store.register_library(store.posts_dir, scope)
-            worker = ensure_worker(DEFAULT_DATABASE, library_id)
-            print(f"Article memory: {worker['state']} (generation requires separate maintenance config/budget).")
-            memory = ArticleMemoryReader(DEFAULT_DATABASE,store.posts_dir,scope)
         if state.get("reading_skill"):
             print("阅读技能实验已开启：efficient-web-research（本地文章适配，使用会话保存版本）。")
         if not store.prompt_status(state)["current"]:
@@ -122,7 +109,7 @@ async def main():
                 retriever = SemanticRetriever(SamplePosts(store.posts_dir), encoder,
                     ROOT / ".blog-agent-data" / "retrieval.sqlite3", mode=store.mode, store=store)
             conversation=create_conversation(client, state, store, max_steps=args.max_steps,
-                                             on_reasoning=hooks.on_reasoning, retrieval_limits=limits, retriever=retriever, memory=memory)
+                                             on_reasoning=hooks.on_reasoning, retrieval_limits=limits, retriever=retriever)
             try:
                 return await interactive_loop(conversation, args.prompt, hooks=hooks)
             finally:

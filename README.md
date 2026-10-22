@@ -1,5 +1,7 @@
 # Blog-Agent
 
+2026-10-21：文章分层摘要、选章摘要工具及独立后台已删除，保留 RAG、原文读取与会话约束。旧会话先结束当前轮，再运行 `python code/blog_agent.py --upgrade-prompt`（自定义目录/状态需带原参数），随后重新启动；新会话直接使用新提示。删除的 `--article-memory` / `--no-article-memory` 参数不再接受。历史摘要数据库留存但不再读取。
+
 2026-10-15更新：提示2026-10-15.14分离检索分块与正文引用树，父章节含子节，标题样式规范化、重名用版本绑定ID消歧；引用失败时在同一输入预算中加入具体错误、待修草稿和当前可用来源。清单仅修复时注入，正常问答不增此负担；最多一次修复，失效/撤权/空间不足明确停止，恢复不重置额度。322项离线通过，真实生成另验。旧会话停旧进程后在轮次边界显式升级再启动，原会话未自动修改。
 
 Python 博客助手。当前可在终端检索、阅读本地 Markdown，进行带来源的多轮问答；支持保存恢复、上下文压缩、工具权限与用量观测。
@@ -51,15 +53,14 @@ python code/blog_agent.py --mode qa --skill efficient-web-research
 ```text
 code/blog_agent.py          当前 CLI 入口
 code/blog_assistant/        博客工具、检索、权限、会话配置
-code/agent_core/            共用循环、状态、压缩、指标和保留的兼容组件
+code/agent_core/            通用会话、注入式工具执行、原子状态、压缩与指标
 code/test_*.py              博客与共用核心回归
 code/evals/                固定任务、历史价格快照与评测说明
-archive/                   旧 Skill Demo 和学习脚本
 Blog/                      本地文章（内容不入库）
 docs/                      仓库任务、协作边界与整理说明
 ```
 
-旧入口已经归档到 `archive/agent_demo/agent_demo.py`；详见 [归档说明](archive/README.md)。现有 Skill 兼容组件保留在共享核心中，博客启动不要求 MCP 服务。
+2026-10-20 精简：旧 Demo、archive、Skill/MCP 专属兼容链及 EXP-1/3 离线模拟已退役。产品阅读 Skill 保留；文章分层摘要后台已于2026-10-21移除。共享 Conversation 注入工具执行器，ConversationStore 使用通用 v3 会话结构，JsonCheckpointStore 负责原子落盘；生产 BM25 与实验模块已解耦。
 
 ## 离线验证
 
@@ -76,11 +77,10 @@ python -m pip install -r requirements-dev.txt
 python code/evaluate_agent.py --mode offline
 ```
 
-统一离线入口包含博客和原核心回归，无付费模型或远程 MCP 调用。测试文章只在临时目录生成；评测结果保存在被忽略的 `code/eval_results/`。归档 Demo 的 MCP 运行另需 Node.js/npx。
+统一离线入口包含博客和通用核心回归，无付费模型或远程 MCP 调用。测试文章只在临时目录生成；评测结果保存在被忽略的 `code/eval_results/`。`evaluate_agent.py` 仅支持 offline/checkpoint；真实博客评测使用 `evaluate_blog_live.py`，需明确配置题目与费用上限。
 
 ## 开发资料
 
-- [分层文章记忆运行说明](docs/article-memory-runtime.md)：独立后台、分层摘要/持久预算、总览选章已接入；缺少专用模型配置/额度/密钥时只索引，真实质量仍待验。旧会话显式升级提示后启用新工具。
 
 本项目是实习展示的核心工程项目，关联网站定位为作品集；[项目亮点与简历素材](docs/project-highlights/README.md)持续记录已实现能力、作用、证据和可用简历表述。
 

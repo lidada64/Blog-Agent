@@ -164,21 +164,17 @@ class BlogAgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError): SamplePosts(selected).read('escape',1,2)
         self.assertEqual(SamplePosts(selected).search('private',1)['matches'],[])
 
-    async def test_legacy_skill_checkpoint_migrates_without_changing_history(self):
-        path=self.root/'legacy.json'; store=ConversationStore(path)
-        state=store.start('fixture',self.root/'skills.json',12000,new=True)
-        state['version']=2
-        state.pop('introduction'); state.pop('max_user_turns')
-        store.save(state)
-        loaded=store.load()
-        self.assertEqual(loaded['version'],3)
-        self.assertEqual(loaded['max_user_turns'],10)
-        self.assertEqual(loaded['history'],state['history'])
-        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['version'],2)
+    async def test_retired_skill_checkpoint_is_rejected_without_modification(self):
+        path = self.root / 'legacy.json'
+        path.write_text(json.dumps({'version': 2, 'kind': 'skill_conversation'}), encoding='utf-8')
+        original = path.read_bytes()
+        with self.assertRaises(ValueError):
+            BlogStore(path, posts_dir=self.posts_dir).load()
+        self.assertEqual(path.read_bytes(), original)
 
     async def test_entrypoint_import_and_local_probe_with_mcp_import_blocked(self):
         code_dir=Path(__file__).parent
-        script="import sys,runpy; sys.modules['mcp']=None; sys.modules['openai']=None; sys.modules['dotenv']=None; sys.path.insert(0,sys.argv[1]); posts=sys.argv[2]; sys.argv=['blog_agent.py','--check-local','--posts-dir',posts]; runpy.run_path(sys.path[0]+'/blog_agent.py',run_name='__main__')"
+        script="import sys,runpy; sys.modules['mcp']=None; sys.modules['blog_assistant.experiment']=None; sys.modules['blog_assistant.retrieval_methods']=None; sys.modules['agent_core.config']=None; sys.modules['agent_core.local_tools']=None; sys.modules['openai']=None; sys.modules['dotenv']=None; sys.path.insert(0,sys.argv[1]); posts=sys.argv[2]; sys.argv=['blog_agent.py','--check-local','--posts-dir',posts]; runpy.run_path(sys.path[0]+'/blog_agent.py',run_name='__main__')"
         result=subprocess.run([sys.executable,'-c',script,str(code_dir),str(self.posts_dir)],capture_output=True,text=True,encoding='utf-8',timeout=30)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertTrue(json.loads(result.stdout)['ok'])

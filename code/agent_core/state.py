@@ -5,9 +5,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 
-from .config import DEFAULT_STATE_PATH
 from .errors import PersistenceError
 
 
@@ -48,43 +46,11 @@ def atomic_write_json(path, data):
                 pass  # Cleanup must not mask the original failure or a successful replace.
 
 
-class StateStore:
-    def __init__(self, path=DEFAULT_STATE_PATH):
+class JsonCheckpointStore:
+    """Atomic JSON persistence; subclasses own schema and lifecycle validation."""
+    def __init__(self, path):
         self.path = Path(path)
-
-    def load(self):
-        if not self.path.exists():
-            return None
-        # Never silently overwrite a broken or incompatible checkpoint.
-        state = json.loads(self.path.read_text(encoding="utf-8"))
-        if state.get("version") != 1:
-            raise ValueError("Unsupported state.json version")
-        for field in ("prompt", "model", "status", "history", "steps", "tool_calls"):
-            if field not in state:
-                raise ValueError(f"Invalid state.json: missing {field}")
-        from .reasoning import validate_reasoning
-        validate_reasoning(state)
-        return state
 
     def save(self, state):
         state["updated_at"] = now()
         atomic_write_json(self.path, state)
-
-    def start(self, prompt, model, *, resume=False, new_task=False):
-        existing = None if new_task else self.load()
-        if resume and existing is None:
-            raise ValueError("No saved task to resume")
-        if existing and (resume or prompt is None or existing["status"] != "completed"):
-            if prompt is not None and prompt != existing["prompt"]:
-                raise ValueError("An unfinished task exists; use --new to start a different task")
-            return existing
-        if prompt is None:
-            raise ValueError("A new task needs a prompt")
-        state = {
-            "version": 1, "task_id": str(uuid4()), "prompt": prompt, "model": model,
-            "status": "pending", "phase": "discover", "created_at": now(),
-            "history": [{"role": "user", "content": prompt}],
-            "steps": [], "tool_calls": [], "final_text": "", "last_error": None,
-        }
-        self.save(state)
-        return state

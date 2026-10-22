@@ -7,16 +7,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agent_core.config import SKILL_SYSTEM_PROMPT
 from agent_core.context import compact_context, context_size, local_window, read_history
-from agent_core.conversation import SkillConversation
+from agent_core.conversation import Conversation
 from agent_core.conversation_state import ConversationStore
-from agent_core.skill_library import SkillLibrary
-from test_agent_conversation import answer, model_with, tool_response, DOCUMENT
-from test_agent_state import call
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from mcp.types import CallToolResult, TextContent, Tool
+from test_fixtures.conversation import answer, model_with, tool_response, call, TOOLS, INSTRUCTIONS, DOCUMENT, execute_tool, executor_for
 
 
 class LocalContextTests(unittest.IsolatedAsyncioTestCase):
@@ -24,14 +20,12 @@ class LocalContextTests(unittest.IsolatedAsyncioTestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.store = ConversationStore(self.root / "conversation.json")
-        self.library = SkillLibrary(self.root / "skills.json")
-        self.state = self.store.start("deepseek-flash", self.library.path, 4000)
-        self.mcp = SimpleNamespace(call_tool=AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text=DOCUMENT)])))
-        self.tools = [Tool(name="search_skills", inputSchema={}), Tool(name="get_skill", inputSchema={})]
+        self.store = ConversationStore(self.root / "conversation.json", instructions=INSTRUCTIONS)
+        self.state = self.store.start("deepseek-flash", 4000, compact_mode="local")
+        self.executor = AsyncMock(side_effect=executor_for(self.state))
 
-    def conversation(self, model, state=None):
-        return SkillConversation(model, self.mcp, self.tools, state or self.state, self.store, self.library)
+    def conversation(self, model, state=None, **kwargs):
+        return Conversation(model, state if state is not None else self.state, self.store, tools=TOOLS, tool_executor=self.executor, **kwargs)
 
     async def test_local_default_reduces_history_keeps_two_recent_turns_and_uses_no_endpoint(self):
         model = model_with(answer("介绍"), answer("旧资料 " * 3000), answer("第二轮回复"), answer("第三轮回复"))
@@ -57,13 +51,17 @@ class LocalContextTests(unittest.IsolatedAsyncioTestCase):
         for request in model.responses.create.call_args_list:
             self.assertFalse(request.kwargs["store"])
             self.assertNotIn("previous_response_id", request.kwargs)
-            self.assertEqual(request.kwargs["instructions"], SKILL_SYSTEM_PROMPT)
+            self.assertEqual(request.kwargs["instructions"], INSTRUCTIONS)
 
-    async def test_old_skill_ids_and_original_results_are_available_after_compression(self):
-        skill_id = "fixture/skills/python-testing/SKILL.md"
-        results = "描述 " * 2000 + f"\nid: {skill_id}\n"
-        self.mcp.call_tool.return_value = CallToolResult(content=[TextContent(type="text", text=results)])
-        model = model_with(answer("介绍"), tool_response(call("skills_search_skills", {"query": "pytest"}, "search_old")),
+    async def test_original_tool_results_are_available_after_compression(self):
+        document_id = "fixture/documents/python-testing.md"
+        results = "描述 " * 2000 + f"\nid: {document_id}\n"
+        async def execute(name, arguments):
+            if name == "read_conversation_history":
+                return read_history(self.state, **arguments)
+            return {"ok": True, "data": {"content": results}}
+        self.executor.side_effect = execute
+        model = model_with(answer("介绍"), tool_response(call("lookup", {"query": "pytest"}, "search_old")),
             answer("第一轮结果"), answer("第二轮结果"), answer("第三轮结果"))
         conversation = self.conversation(model)
         await conversation.introduce()
@@ -72,18 +70,18 @@ class LocalContextTests(unittest.IsolatedAsyncioTestCase):
         await conversation.submit("第三轮")
         memory = json.loads(self.state["context"][0]["content"].split("\n", 1)[1])
         record = next(record for record in memory["records"] if record.get("type") == "function_call_output")
-        self.assertIn(skill_id, record["skill_ids"])
+        self.assertEqual(record["call_id"], "search_old")
         self.assertTrue(record["truncated"])
         original = await conversation.execute_tool("read_conversation_history", {"start": record["history_index"], "limit": 1})
         full = json.loads(original["data"][0]["item"]["output"])
-        self.assertEqual(full["data"]["content"][0]["text"], results)
+        self.assertEqual(full["data"]["content"], results)
         self.assertEqual(self.state["tool_calls"][0]["attempts"], 1)
         model.responses.compact.assert_not_awaited()
 
     async def test_recent_tool_batch_is_replayed_with_all_matching_results(self):
         model = model_with(answer("介绍"), answer("旧资料 " * 2000),
-            tool_response(call("download_skill", {"id": "python-testing"}, "download"),
-                          call("search_saved_skills", {"query": "python"}, "local_search")),
+            tool_response(call("lookup", {"query": "python-testing"}, "download"),
+                          call("lookup", {"query": "python"}, "local_search")),
             answer("第二轮结果"), answer("第三轮结果"))
         conversation = self.conversation(model)
         await conversation.introduce()
@@ -95,7 +93,7 @@ class LocalContextTests(unittest.IsolatedAsyncioTestCase):
         outputs = [item["call_id"] for item in window if item.get("type") == "function_call_output"]
         self.assertEqual(calls, ["download", "local_search"])
         self.assertEqual(outputs, calls)
-        self.assertEqual(self.library.search("pytest")["count"], 1)
+        self.assertEqual(self.executor.await_count, 2)
 
     async def test_archive_tool_can_recover_old_content_through_model_loop_after_restart(self):
         first = model_with(answer("介绍"), answer("完整旧内容 " * 1000), answer("第二轮"), answer("第三轮"))
@@ -134,9 +132,9 @@ class LocalContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state["compactions"], [])
 
     def test_mode_switch_and_migration_work_on_existing_checkpoint(self):
-        state = self.store.start("deepseek-flash", self.library.path, 4000, new=True, compact_mode="standalone")
+        state = self.store.start("deepseek-flash", 4000, new=True, compact_mode="standalone")
         original_id = state["conversation_id"]
-        resumed = self.store.start("deepseek-flash", self.library.path, 4000, resume=True, compact_mode="local")
+        resumed = self.store.start("deepseek-flash", 4000, resume=True, compact_mode="local")
         self.assertEqual(resumed["compact_mode"], "local")
         self.assertEqual(resumed["conversation_id"], original_id)
         del resumed["compact_mode"]

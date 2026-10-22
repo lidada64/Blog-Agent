@@ -1,4 +1,10 @@
-# Repository separation — 2026-10-11
+# Repository layout
+
+Current update — 2026-10-20: archive/ and the old Skill/MCP-specific runtime chain, SkillConversation, run_agent and StateStore are retired. The product remains code/blog_agent.py. Conversation accepts an injected executor; ConversationStore uses the generic v3 schema and JsonCheckpointStore provides atomic JSON persistence. Production ranking.py and retrieval_budget.py are separated from offline experiment helpers and business orchestration. EXP-1/3 offline modules, their drivers/tests, benchmark_compression.py and the old scenarios.json are retired. Reading Skill support, the article-summary worker, EXP-0/2, quality sets and evaluate_blog_live.py remain. evaluate_agent.py supports offline/checkpoint only. No current validation result is asserted here.
+
+## Historical separation — 2026-10-11
+
+The following records the 2026-10-11 tree and verification; archived commands below are retired, not current instructions.
 
 The previous remote was lidada64/Agent-Study, with Git metadata inside code/. The new product repository is lidada64/Blog-Agent, with the local Git root at D:/CST/code/Agent. Source paths remain code/ so local article and credential paths remain compatible. Existing commit history is preserved; archive/agent-study-before-blog-agent identifies the pre-reorganization head.
 

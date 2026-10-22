@@ -29,7 +29,7 @@ def emit(state, event_type, *, span_id=None, parent_span_id=None,
          turn_id=None, tool_call_id=None, **metadata):
     if event_type not in EVENT_TYPES or set(metadata) - FIELDS:
         raise ValueError("Unknown trace event or metadata field")
-    # Applications opt in by starting a trace; legacy Skill/task state is unchanged.
+    # Applications opt in by starting a trace; untraced checkpoints remain unchanged.
     if "trace" not in state and event_type != "session.start":
         return None
     trace = state.setdefault("trace", {

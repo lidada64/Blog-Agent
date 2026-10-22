@@ -61,7 +61,7 @@ class NoCompressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_none_mode_keeps_context_even_when_threshold_is_exceeded(self):
         with TemporaryDirectory() as directory:
             store = ConversationStore(Path(directory) / "state.json")
-            state = store.start("deepseek-flash", Path(directory) / "skills.json", 1, compact_mode="none")
+            state = store.start("deepseek-flash", 1, compact_mode="none")
             state["context"] = [{"role": "user", "content": "large context " * 1000}]
             state["history"] = copy.deepcopy(state["context"])
             original = copy.deepcopy(state)

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from agent_core.tracing import emit
-from .retrieval_methods import rank_bm25
+from .ranking import rank_bm25
 from .sections import CHUNK_VERSION, chunks
 
 
